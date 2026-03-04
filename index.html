@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>A股量化选股系统</title>
+  <link rel="stylesheet" href="css/style.css">
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+  <style>
+    /* Additional inline styles for signal badges */
+    .signal-badge {
+      display: inline-block;
+      font-size: var(--text-2xs);
+      padding: 2px 8px;
+      border-radius: 100px;
+      font-weight: 600;
+      margin-right: 4px;
+      margin-bottom: 4px;
+    }
+    .signal-good {
+      background: var(--market-up-dim);
+      color: var(--market-up-bright);
+    }
+    .signal-bad {
+      background: var(--market-down-dim);
+      color: var(--market-down-bright);
+    }
+
+    /* Score card in analysis */
+    .score-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      padding: var(--space-4);
+    }
+
+    .score-main-val {
+      font-family: var(--font-mono);
+      font-size: 48px;
+      font-weight: 700;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .score-sub-row {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+      margin-top: var(--space-4);
+    }
+
+    .score-sub-item {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+    }
+
+    .score-sub-label {
+      font-size: var(--text-xs);
+      color: var(--text-muted);
+      width: 60px;
+      flex-shrink: 0;
+    }
+
+    .score-sub-bar {
+      flex: 1;
+      height: 6px;
+      background: var(--bg-input);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .score-sub-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.6s ease;
+    }
+
+    .score-sub-val {
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      font-weight: 600;
+      width: 36px;
+      text-align: right;
+    }
+
+    /* Holdings table */
+    .holdings-table {
+      width: 100%;
+      font-size: var(--text-xs);
+    }
+
+    .holdings-table th {
+      text-align: left;
+      padding: var(--space-2) var(--space-3);
+      color: var(--text-muted);
+      font-size: var(--text-2xs);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-elevated);
+    }
+
+    .holdings-table td {
+      padding: var(--space-2) var(--space-3);
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border-subtle);
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+    }
+
+    /* Stats row in backtest controls */
+    .benchmark-label {
+      font-size: var(--text-2xs);
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    /* App-level loading overlay */
+    #app-loading {
+      position: fixed;
+      inset: 0;
+      background: var(--bg-base);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-4);
+      z-index: 9999;
+    }
+
+    #app-loading .app-title-lg {
+      font-size: var(--text-2xl);
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: -0.02em;
+    }
+
+    #app-loading .app-title-lg span { color: var(--accent-blue); }
+
+    #loading-bar {
+      width: 200px;
+      height: 3px;
+      background: var(--bg-card);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    #loading-bar-fill {
+      height: 100%;
+      background: var(--accent-blue);
+      border-radius: 2px;
+      animation: loading-progress 2s ease-in-out infinite;
+    }
+
+    @keyframes loading-progress {
+      0% { width: 0%; margin-left: 0%; }
+      50% { width: 60%; margin-left: 20%; }
+      100% { width: 0%; margin-left: 100%; }
+    }
+
+    /* Backtest benchmark note */
+    .bt-benchmark-note {
+      font-size: var(--text-xs);
+      color: var(--text-muted);
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- APP-LEVEL LOADING OVERLAY                               -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div id="app-loading" id="loading-overlay">
+  <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-label="logo">
+    <rect x="4" y="8" width="8" height="32" rx="2" fill="#3B82F6" opacity="0.5"/>
+    <rect x="16" y="16" width="8" height="24" rx="2" fill="#3B82F6" opacity="0.7"/>
+    <rect x="28" y="4" width="8" height="36" rx="2" fill="#3B82F6"/>
+    <rect x="40" y="12" width="8" height="28" rx="2" fill="#3B82F6" opacity="0.8"/>
+    <path d="M4 36 L20 20 L32 28 L48 8" stroke="#EF4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <div class="app-title-lg">A股<span>量化选股</span>系统</div>
+  <div id="loading-bar"><div id="loading-bar-fill"></div></div>
+  <div id="loading-status" style="font-size:12px;color:var(--text-muted)">正在加载数据...</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- MAIN APP                                                -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div id="app">
+
+  <!-- ─── HEADER ─────────────────────────────────────────── -->
+  <header class="app-header">
+    <div class="header-left">
+      <a class="app-logo" href="#">
+        <!-- Inline SVG Logo -->
+        <svg class="logo-icon" viewBox="0 0 32 32" fill="none" aria-label="A股量化选股系统">
+          <rect x="2" y="6" width="5" height="20" rx="1.5" fill="#3B82F6" opacity="0.45"/>
+          <rect x="10" y="11" width="5" height="15" rx="1.5" fill="#3B82F6" opacity="0.65"/>
+          <rect x="18" y="3" width="5" height="23" rx="1.5" fill="#3B82F6"/>
+          <rect x="26" y="8" width="5" height="18" rx="1.5" fill="#3B82F6" opacity="0.8"/>
+          <path d="M2 22 L14.5 13 L21.5 18 L30 6" stroke="#EF4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="app-title">A股<span>量化选股</span>系统</span>
+      </a>
+      <div class="header-sep"></div>
+      <div class="header-badge">
+        <div class="badge-dot"></div>
+        <span>Tushare Pro (Demo)</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <span id="header-date" class="header-date"></span>
+      <span id="header-time" class="header-time"></span>
+    </div>
+  </header>
+
+  <!-- ─── TAB BAR ────────────────────────────────────────── -->
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-tab="screener">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M1.5 3h13M3.5 6h9M5.5 9h5M7 12h2"/>
+      </svg>
+      量化选股
+    </button>
+    <button class="tab-btn" data-tab="analysis">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <polyline points="1,11 5,7 9,9 15,3"/>
+        <rect x="1" y="13" width="14" height="1.5" rx="0.5" fill="currentColor" stroke="none"/>
+      </svg>
+      个股分析
+    </button>
+    <button class="tab-btn" data-tab="backtest">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="8" cy="8" r="6.5"/>
+        <polyline points="8,4 8,8 11,10"/>
+      </svg>
+      回测验证
+    </button>
+    <button class="tab-btn" data-tab="settings">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="8" cy="8" r="2.5"/>
+        <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41"/>
+      </svg>
+      Tushare 配置
+    </button>
+  </nav>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- TAB 1: 量化选股                                          -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div id="tab-screener" class="tab-content active">
+    <div class="screener-layout">
+
+      <!-- ─── LEFT SIDEBAR ─────────────────────────────────── -->
+      <aside class="screener-sidebar">
+
+        <!-- SECTION: 价值因子 -->
+        <div class="filter-section">
+          <div class="filter-section-header">
+            <div class="filter-section-title">
+              <svg class="filter-section-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+                <circle cx="7" cy="7" r="5.5"/><path d="M7 4v3l2 1.5"/>
+              </svg>
+              价值因子
+            </div>
+            <svg class="filter-toggle-arrow" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+              <polyline points="3,5 7,9 11,5"/>
+            </svg>
+          </div>
+          <div class="filter-section-body">
+            <div class="form-row">
+              <span class="form-label">市盈率 PE</span>
+              <div class="range-inputs">
+                <input type="number" id="f-pe-min" class="filter-input" placeholder="最小" min="0" step="1">
+                <span>~</span>
+                <input type="number" id="f-pe-max" class="filter-input" placeholder="最大" min="0" step="1">
+              </div>
+            </div>
+            <div class="form-row">
+              <span class="form-label">市净率 PB</span>
+              <div class="range-inputs">
+                <input type="number" id="f-pb-min" class="filter-input" placeholder="最小" min="0" step="0.1">
+                <span>~</span>
+                <input type="number" id="f-pb-max" class="filter-input" placeholder="最大" min="0" step="0.1">
+              </div>
+            </div>
+            <div class="form-row">
+              <span class="form-label">股息率 ≥</span>
+              <div class="range-inputs">
+                <input type="number" id="f-div-min" class="filter-input" placeholder="最小%" min="0" step="0.1">
+              </div>
+            </div>
+            <div class="form-row">
+              <span class="form-label">市销率 PS ≤</span>
+              <div class="range-inputs">
+                <input type="number" id="f-ps-max" class="filter-input" placeholder="最大" min="0" step="0.5">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SECTION: 成长因子 -->
+        <div class="filter-section">
+          <div class="filter-section-header">
+            <div class="filter-section-title">
+              <svg class="filter-section-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+                <polyline points="1,10 5,6 9,8 13,2"/><polyline points="10,2 13,2 13,5"/>
+              </svg>
+              成长因子
+            </div>
+            <svg class="filter-toggle-arrow" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+              <polyline points="3,5 7,9 11,5"/>
+            </svg>
+          </div>
+          <div class="filter-section-body">
+            <div class="form-row">
+              <span class="form-label">营收增长 ≥</span>
+              <div class="range-inputs">
+                <input type="number" id="f-rev-growth-min" class="filter-input" placeholder="最小%" step="1">
+              </div>
+            </div>
+            <div class="form-row">
+              <span class="form-label">净利增长 ≥</span>
+              <div class="range-inputs">
+                <input type="number" id="f-ni-growth-min" class="filter-input" placeholder="最小%" step="1">
+              </div>
+            </div>
+            <div class="form-row">
+              <span class="form-label">ROE ≥</span>
+              <div class="range-inputs">
+                <input type="number" id="f-roe-min" class="filter-input" placeholder="最小%" step="1">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SECTION: 质量因子 -->
+        <div class="filter-section">
+          <div class="filter-section-header">
+            <div class="filter-section-title">
+              <svg class="filter-section-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M7 1L9 5l4.5.65-3.25 3.17.77 4.48L7 11.1l-4.02 2.2.77-4.48L.5 5.65 5 5z"/>
+              </svg>
+              质量因子
+            </div>
+            <svg class="filter-toggle-arrow" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+              <polyline points="3,5 7,9 11,5"/>
+            </svg>
+          </div>
+          <div class="filter-section-body">
+            <div class="form-row">
+              <span class="form-label">毛利率 ≥</span>
+              <div class="range-inputs">
+                <input type="number" id="f-gm-min" class="filter-input" placeholder="最小%" step="1">
+              </div>
+            </div>
+            <div class="form-row">
+              <span class="form-label">负债率 ≤</span>
+              <div class="range-inputs">
+                <input type="number" id="f-debt-max" class="filter-input" placeholder="最大%" step="5">
+              </div>
+            </div>
+            <div class="form-row">
+              <span class="form-label">流动比率 ≥</span>
+              <div class="range-inputs">
+                <input type="number" id="f-cr-min" class="filter-input" placeholder="最小" step="0.1">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SECTION: 动量因子 -->
+        <div class="filter-section">
+          <div class="filter-section-header">
+            <div class="filter-section-title">
+              <svg class="filter-section-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M2 8l3-5 3 3 4-5"/><path d="M12 9l-2-2-2 2-2-2"/>
+              </svg>
+              动量因子
+            </div>
+            <svg class="filter-toggle-arrow" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+              <polyline points="3,5 7,9 11,5"/>
+            </svg>
+          </div>
+          <div class="filter-section-body">
+            <div class="form-row">
+              <span class="form-label">20日动量</span>
+              <div class="range-inputs">
+                <input type="number" id="f-mom20-min" class="filter-input" placeholder="最小%" step="1">
+                <span>~</span>
+                <input type="number" id="f-mom20-max" class="filter-input" placeholder="最大%" step="1">
+              </div>
+            </div>
+            <div class="form-row">
+              <span class="form-label">RSI</span>
+              <div class="range-inputs">
+                <input type="number" id="f-rsi-min" class="filter-input" placeholder="最小" min="0" max="100" step="5">
+                <span>~</span>
+                <input type="number" id="f-rsi-max" class="filter-input" placeholder="最大" min="0" max="100" step="5">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SECTION: 因子权重 -->
+        <div class="filter-section">
+          <div class="filter-section-header">
+            <div class="filter-section-title">
+              <svg class="filter-section-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M2 4h10v8H2z"/><path d="M5 4V2h4v2"/><path d="M7 7v3"/>
+              </svg>
+              因子权重
+            </div>
+            <svg class="filter-toggle-arrow" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+              <polyline points="3,5 7,9 11,5"/>
+            </svg>
+          </div>
+          <div class="filter-section-body">
+            <div class="weight-grid">
+              <!-- Value -->
+              <div class="weight-row">
+                <div class="weight-header">
+                  <span class="weight-label">价值因子</span>
+                  <span class="weight-val" id="weight-val-value">25%</span>
+                </div>
+                <input type="range" id="weight-value" min="0" max="100" value="25">
+                <div class="weight-track"><div class="weight-fill value" id="weight-fill-value" style="width:25%"></div></div>
+              </div>
+              <!-- Growth -->
+              <div class="weight-row">
+                <div class="weight-header">
+                  <span class="weight-label">成长因子</span>
+                  <span class="weight-val" id="weight-val-growth">25%</span>
+                </div>
+                <input type="range" id="weight-growth" min="0" max="100" value="25">
+                <div class="weight-track"><div class="weight-fill growth" id="weight-fill-growth" style="width:25%"></div></div>
+              </div>
+              <!-- Quality -->
+              <div class="weight-row">
+                <div class="weight-header">
+                  <span class="weight-label">质量因子</span>
+                  <span class="weight-val" id="weight-val-quality">25%</span>
+                </div>
+                <input type="range" id="weight-quality" min="0" max="100" value="25">
+                <div class="weight-track"><div class="weight-fill quality" id="weight-fill-quality" style="width:25%"></div></div>
+              </div>
+              <!-- Momentum -->
+              <div class="weight-row">
+                <div class="weight-header">
+                  <span class="weight-label">动量因子</span>
+                  <span class="weight-val" id="weight-val-momentum">25%</span>
+                </div>
+                <input type="range" id="weight-momentum" min="0" max="100" value="25">
+                <div class="weight-track"><div class="weight-fill momentum" id="weight-fill-momentum" style="width:25%"></div></div>
+              </div>
+              <!-- Total -->
+              <div class="weight-total-row">
+                <span class="weight-total-label">合计</span>
+                <span class="weight-total-val ok" id="weight-total">100</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SECTION: 行业筛选 -->
+        <div class="filter-section">
+          <div class="filter-section-header">
+            <div class="filter-section-title">
+              <svg class="filter-section-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="1" y="1" width="5" height="5" rx="1"/><rect x="8" y="1" width="5" height="5" rx="1"/>
+                <rect x="1" y="8" width="5" height="5" rx="1"/><rect x="8" y="8" width="5" height="5" rx="1"/>
+              </svg>
+              行业筛选
+            </div>
+            <svg class="filter-toggle-arrow" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+              <polyline points="3,5 7,9 11,5"/>
+            </svg>
+          </div>
+          <div class="filter-section-body">
+            <div id="sector-chips" class="sector-grid">
+              <!-- Populated by JS -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="btn-group">
+          <button class="btn btn-primary" id="run-btn">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="4,2 14,8 4,14" fill="currentColor" stroke="none"/>
+            </svg>
+            开始选股
+          </button>
+          <button class="btn btn-secondary" id="reset-btn">重置</button>
+        </div>
+
+      </aside>
+
+      <!-- ─── MAIN CONTENT ──────────────────────────────────── -->
+      <main class="screener-main">
+        <div class="screener-main-scroll">
+
+          <!-- KPI Cards -->
+          <div class="kpi-row">
+            <div class="kpi-card accent-blue">
+              <div class="kpi-label">符合条件股票</div>
+              <div class="kpi-value" id="kpi-count">—</div>
+              <div class="kpi-sub">只</div>
+            </div>
+            <div class="kpi-card accent-purple">
+              <div class="kpi-label">平均综合得分</div>
+              <div class="kpi-value" id="kpi-avg-score">—</div>
+              <div class="kpi-sub">满分100</div>
+            </div>
+            <div class="kpi-card accent-red">
+              <div class="kpi-label">平均市盈率</div>
+              <div class="kpi-value" id="kpi-avg-pe">—</div>
+              <div class="kpi-sub">倍</div>
+            </div>
+            <div class="kpi-card accent-green">
+              <div class="kpi-label">平均ROE</div>
+              <div class="kpi-value" id="kpi-avg-roe">—</div>
+              <div class="kpi-sub">净资产收益率</div>
+            </div>
+          </div>
+
+          <!-- Results Table -->
+          <div class="table-container">
+            <div class="table-header">
+              <span class="table-title">选股结果</span>
+              <span class="table-count" id="table-count">共 — 只</span>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort="rank" style="width:44px;text-align:left">#</th>
+                    <th data-sort="code" style="text-align:left">代码</th>
+                    <th data-sort="name" style="text-align:left">名称</th>
+                    <th data-sort="industry" style="text-align:left">行业</th>
+                    <th data-sort="compositeScore" style="min-width:120px">综合得分</th>
+                    <th data-sort="valueScore">价值</th>
+                    <th data-sort="growthScore">成长</th>
+                    <th data-sort="qualityScore">质量</th>
+                    <th data-sort="momentumScore">动量</th>
+                    <th data-sort="price">现价</th>
+                    <th data-sort="pe">PE</th>
+                    <th data-sort="pb">PB</th>
+                    <th data-sort="roe">ROE%</th>
+                    <th data-sort="revGrowth">营收增长%</th>
+                    <th data-sort="mom20">20日动量%</th>
+                  </tr>
+                </thead>
+                <tbody id="results-tbody">
+                  <!-- Populated by JS -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Bottom Charts -->
+          <div class="charts-row">
+            <div class="chart-card">
+              <div class="chart-card-title">行业分布</div>
+              <div class="chart-wrapper">
+                <canvas id="sector-chart"></canvas>
+              </div>
+            </div>
+            <div class="chart-card">
+              <div class="chart-card-title">综合得分分布</div>
+              <div class="chart-wrapper">
+                <canvas id="score-histogram"></canvas>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </main>
+
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- TAB 2: 个股分析                                          -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div id="tab-analysis" class="tab-content">
+    <div class="analysis-layout">
+
+      <!-- No stock selected -->
+      <div id="no-stock-msg" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--text-muted)">
+        <svg width="64" height="64" viewBox="0 0 64 64" fill="none" opacity="0.3">
+          <rect x="8" y="8" width="48" height="48" rx="8" stroke="currentColor" stroke-width="2"/>
+          <polyline points="16,44 28,28 36,36 48,16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="36" cy="36" r="3" fill="currentColor"/>
+        </svg>
+        <div style="font-size:14px;font-weight:600;color:var(--text-secondary)">请从选股结果中点击一只股票</div>
+        <div style="font-size:12px;color:var(--text-muted)">在「量化选股」标签中运行选股后，点击任意行查看个股详情</div>
+      </div>
+
+      <!-- Analysis content (shown when stock selected) -->
+      <div id="analysis-content" style="display:none;height:100%;overflow:hidden">
+        <div class="analysis-scroll">
+
+          <!-- Stock Header -->
+          <div class="stock-header-card">
+            <div class="stock-header-left">
+              <div class="stock-header-name" id="analysis-stock-name">—</div>
+              <div class="stock-header-meta">
+                <span class="stock-header-code" id="analysis-stock-code">—</span>
+                <span class="stock-header-sector" id="analysis-stock-sector">—</span>
+              </div>
+            </div>
+            <div class="stock-header-right">
+              <div class="stock-price-big" id="analysis-price">—</div>
+              <div class="stock-change" id="analysis-change">—</div>
+            </div>
+          </div>
+
+          <!-- Price Chart -->
+          <div class="financials-card">
+            <div class="card-title">
+              <svg class="card-title-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+                <polyline points="1,10 5,5 9,7 13,2"/>
+              </svg>
+              价格走势（近250交易日）
+            </div>
+            <div class="chart-wrapper" style="height:260px">
+              <canvas id="price-chart"></canvas>
+            </div>
+            <!-- Volume -->
+            <div class="chart-wrapper" style="height:80px;margin-top:8px">
+              <canvas id="volume-chart"></canvas>
+            </div>
+          </div>
+
+          <!-- Signals row -->
+          <div class="financials-card">
+            <div class="card-title">
+              <svg class="card-title-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M7 1l1.5 3 3.5.5-2.5 2.5.5 3.5L7 9.5 4 11l.5-3.5L2 5l3.5-.5z"/>
+              </svg>
+              技术信号
+            </div>
+            <div id="ma-signals" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+          </div>
+
+          <!-- Main grid: Financials + Score -->
+          <div class="analysis-grid">
+            <!-- Financials -->
+            <div class="financials-card">
+              <div class="card-title">
+                <svg class="card-title-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <rect x="1" y="3" width="12" height="8" rx="1.5"/>
+                  <path d="M4 7h6M4 9h4"/>
+                </svg>
+                财务概览
+              </div>
+              <div class="financials-grid" id="financials-grid">
+                <!-- Populated by JS -->
+              </div>
+            </div>
+
+            <!-- Score card -->
+            <div class="score-card">
+              <div class="card-title">
+                <svg class="card-title-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <circle cx="7" cy="7" r="5.5"/>
+                  <path d="M7 4v4l2 1"/>
+                </svg>
+                量化得分
+              </div>
+              <div style="text-align:center;padding:16px 0">
+                <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px">综合得分</div>
+                <div class="score-main-val" id="stock-composite-score" style="color:var(--accent-blue)">—</div>
+              </div>
+              <div class="score-sub-row">
+                <div class="score-sub-item">
+                  <span class="score-sub-label">价值</span>
+                  <div class="score-sub-bar"><div class="score-sub-bar-fill" id="stock-score-bar-value" style="width:0%;background:#3B82F6"></div></div>
+                  <span class="score-sub-val" id="stock-score-value">—</span>
+                </div>
+                <div class="score-sub-item">
+                  <span class="score-sub-label">成长</span>
+                  <div class="score-sub-bar"><div class="score-sub-bar-fill" id="stock-score-bar-growth" style="width:0%;background:#8B5CF6"></div></div>
+                  <span class="score-sub-val" id="stock-score-growth">—</span>
+                </div>
+                <div class="score-sub-item">
+                  <span class="score-sub-label">质量</span>
+                  <div class="score-sub-bar"><div class="score-sub-bar-fill" id="stock-score-bar-quality" style="width:0%;background:#10B981"></div></div>
+                  <span class="score-sub-val" id="stock-score-quality">—</span>
+                </div>
+                <div class="score-sub-item">
+                  <span class="score-sub-label">动量</span>
+                  <div class="score-sub-bar"><div class="score-sub-bar-fill" id="stock-score-bar-momentum" style="width:0%;background:#F59E0B"></div></div>
+                  <span class="score-sub-val" id="stock-score-momentum">—</span>
+                </div>
+              </div>
+
+              <div class="divider"></div>
+
+              <!-- RSI Gauge -->
+              <div style="padding:8px 0">
+                <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px">RSI(14)</div>
+                <div style="text-align:center">
+                  <div class="gauge-label" id="rsi-value" style="font-size:28px;font-family:var(--font-mono);font-weight:700">—</div>
+                  <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px" id="rsi-label">—</div>
+                  <div class="gauge-track">
+                    <div class="gauge-thumb" id="rsi-thumb" style="left:50%"></div>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;margin-top:4px">
+                    <span style="font-size:10px;color:var(--market-down)">0 超卖</span>
+                    <span style="font-size:10px;color:var(--text-muted)">50</span>
+                    <span style="font-size:10px;color:var(--market-up)">100 超买</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Technical grid -->
+              <div class="divider"></div>
+              <div class="financials-grid" id="tech-grid"></div>
+            </div>
+          </div>
+
+          <!-- Charts: Quarterly + MACD + RSI -->
+          <div class="analysis-grid">
+            <div class="financials-card">
+              <div class="card-title">季度营收与净利润</div>
+              <div class="chart-wrapper" style="height:200px">
+                <canvas id="quarterly-chart"></canvas>
+              </div>
+            </div>
+            <div class="financials-card">
+              <div class="card-title">MACD 指标</div>
+              <div class="chart-wrapper" style="height:200px">
+                <canvas id="macd-chart"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <!-- RSI chart -->
+          <div class="financials-card">
+            <div class="card-title">RSI 走势（近60交易日）</div>
+            <div class="chart-wrapper" style="height:160px">
+              <canvas id="rsi-chart"></canvas>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- TAB 3: 回测验证                                          -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div id="tab-backtest" class="tab-content">
+    <div class="backtest-layout">
+      <div class="backtest-scroll">
+
+        <!-- Controls -->
+        <div class="backtest-controls">
+          <div class="card-title" style="margin-bottom:16px">
+            <svg class="card-title-icon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="7" cy="7" r="5.5"/><polyline points="7,4 7,8 10,10"/>
+            </svg>
+            回测参数配置
+          </div>
+          <div class="controls-grid">
+
+            <div class="control-group">
+              <div class="control-label">调仓频率</div>
+              <div class="toggle-group" id="bt-frequency">
+                <button class="toggle-btn active" data-value="monthly">月度调仓</button>
+                <button class="toggle-btn" data-value="quarterly">季度调仓</button>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <div class="control-label">持仓股票数</div>
+              <div class="toggle-group" id="bt-topn">
+                <button class="toggle-btn" data-value="5">Top 5</button>
+                <button class="toggle-btn active" data-value="10">Top 10</button>
+                <button class="toggle-btn" data-value="20">Top 20</button>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <div class="control-label">起始日期</div>
+              <input type="date" id="bt-start-date">
+            </div>
+
+            <div class="control-group">
+              <div class="control-label">结束日期</div>
+              <input type="date" id="bt-end-date">
+            </div>
+
+          </div>
+
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <button class="btn btn-primary" id="run-backtest-btn" style="flex:none;padding:8px 24px">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                <polygon points="4,2 14,8 4,14" fill="currentColor" stroke="none"/>
+              </svg>
+              运行回测
+            </button>
+            <span class="bt-benchmark-note">基准: 沪深300 · 等权持仓 · 手续费未计算</span>
+          </div>
+        </div>
+
+        <!-- Results (hidden until run) -->
+        <div id="backtest-results" style="display:none">
+
+          <!-- Performance Metrics -->
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <div class="metric-label">年化收益率</div>
+              <div class="metric-value" id="bt-annual-return">—</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">最大回撤</div>
+              <div class="metric-value" id="bt-max-drawdown">—</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">夏普比率</div>
+              <div class="metric-value" id="bt-sharpe">—</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">胜率</div>
+              <div class="metric-value" id="bt-win-rate">—</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">超额收益 α</div>
+              <div class="metric-value" id="bt-alpha">—</div>
+            </div>
+          </div>
+
+          <!-- Equity Curve -->
+          <div class="chart-card" style="background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:var(--radius-lg)">
+            <div class="chart-card-title">净值曲线 vs 沪深300</div>
+            <div class="chart-wrapper" style="height:300px">
+              <canvas id="equity-chart"></canvas>
+            </div>
+          </div>
+
+          <!-- Monthly Returns Heatmap -->
+          <div class="heatmap-container">
+            <div class="card-title" style="margin-bottom:12px">月度收益率热力图</div>
+            <div id="heatmap-grid" class="heatmap-grid"></div>
+          </div>
+
+          <!-- Holdings History -->
+          <div class="table-container">
+            <div class="table-header">
+              <span class="table-title">近期持仓记录</span>
+            </div>
+            <table class="holdings-table">
+              <thead>
+                <tr>
+                  <th>调仓日期</th>
+                  <th>持仓代码</th>
+                  <th>持仓名称</th>
+                  <th>最高得分</th>
+                </tr>
+              </thead>
+              <tbody id="holdings-tbody"></tbody>
+            </table>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- TAB 4: Tushare 配置                                       -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div id="tab-settings" class="tab-content">
+    <div class="settings-layout">
+
+      <div>
+        <div style="font-size:18px;font-weight:700;color:var(--text-primary);margin-bottom:4px">数据源配置</div>
+        <div style="font-size:12px;color:var(--text-muted)">连接 Tushare Pro 获取实时 A 股数据</div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Tushare Pro Token</div>
+
+        <div class="settings-row">
+          <div class="settings-label">API Token</div>
+          <input type="text" id="tushare-token" placeholder="请输入您的 Tushare Pro Token" autocomplete="off">
+        </div>
+
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+          <button class="btn btn-primary" id="test-connection-btn" style="flex:none">测试连接</button>
+          <div class="connection-status demo" id="connection-status">
+            <span>● 当前使用演示数据</span>
+          </div>
+        </div>
+
+        <div class="settings-hint">
+          ℹ️ 当前使用演示数据（50只A股，750日历史行情）。输入 Tushare Pro Token 后可获取实时数据，包含全市场股票的日线行情、财务数据和技术指标。
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">数据刷新</div>
+        <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+          <button class="btn btn-primary" id="refresh-incremental-btn" style="flex:none">📈 增量更新行情</button>
+          <button class="btn btn-secondary" id="refresh-full-btn" style="flex:none">🔄 全量刷新数据</button>
+        </div>
+        <div id="refresh-status" style="font-size:12px;color:var(--text-muted);margin-bottom:8px"></div>
+        <div id="data-status-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">
+          <div class="mini-stat">
+            <div class="mini-stat-label">股票数量</div>
+            <div class="mini-stat-value" id="ds-stock-count">--</div>
+          </div>
+          <div class="mini-stat">
+            <div class="mini-stat-label">最新行情日</div>
+            <div class="mini-stat-value" id="ds-last-price">--</div>
+          </div>
+          <div class="mini-stat">
+            <div class="mini-stat-label">缓存年龄</div>
+            <div class="mini-stat-value" id="ds-cache-age">--</div>
+          </div>
+          <div class="mini-stat">
+            <div class="mini-stat-label">数据状态</div>
+            <div class="mini-stat-value" id="ds-data-state">--</div>
+          </div>
+        </div>
+        <div class="settings-hint">
+          💡 增量更新：只获取最新行情（~2分钟）。全量刷新：重新获取股票列表 + 3年日线 + 财务报表 + 估值指标（~30-60分钟，视 Tushare 积分等级）。
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">数据说明</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div>
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px">演示数据</div>
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.6">
+              • 50只A股代表性标的<br>
+              • 750个交易日价格数据<br>
+              • 模拟财务指标（PE/PB/ROE等）<br>
+              • 沪深300指数基准数据
+            </div>
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px">实时数据（需Token）</div>
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.6">
+              • 全市场5000+只A股<br>
+              • 实时行情与历史数据<br>
+              • 季报/年报财务数据<br>
+              • 分析师预测与评级
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">关于本系统</div>
+        <div style="font-size:12px;color:var(--text-secondary);line-height:1.8">
+          <p>本系统基于多因子量化选股模型，综合评估A股市场股票的价值、成长、质量和动量四大维度。</p>
+          <br>
+          <p style="color:var(--text-muted)">⚠️ <strong>风险提示：</strong>本工具仅供参考，不构成投资建议。股市有风险，投资需谨慎。历史回测结果不代表未来收益。</p>
+          <br>
+          <p><a href="https://tushare.pro/register" target="_blank" style="color:var(--accent-blue);text-decoration:none">→ 注册 Tushare Pro 账号</a></p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div><!-- /#app -->
+
+<!-- Scripts -->
+<script src="js/api_client.js"></script>
+<script src="js/screener.js"></script>
+<script src="js/backtest.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/app.js"></script>
+
+<script>
+  // Hide app loading overlay after data loads
+  // (app.js calls this internally but as fallback)
+  window.addEventListener('load', () => {
+    setTimeout(() => {
+      const overlay = document.getElementById('app-loading');
+      if (overlay && overlay.style.display !== 'none') {
+        overlay.style.opacity = '0';
+        overlay.style.transition = 'opacity 0.3s';
+        setTimeout(() => overlay.remove(), 300);
+      }
+    }, 5000);
+  });
+</script>
+
+</body>
+</html>
