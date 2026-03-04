@@ -1,0 +1,10 @@
+api/cache.db
+api/cache.db-wal
+api/cache.db-shm
+api/server.log
+api/__pycache__
+__pycache__
+*.pyc
+.git
+.gitignore
+DEPLOY_GUIDE.md
