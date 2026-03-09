@@ -10,6 +10,19 @@ services:
       - "8002:8002"
     volumes:
       - quant-data:/app/data
+    environment:
+      - TUSHARE_TOKEN=b60ebc986942e4127801536d8d64d4af94a4213c862f290277b09ba0
+      - LEARNING_TIMEZONE=Asia/Shanghai
+      - LEARNING_RUN_HOUR=18
+      - LEARNING_RUN_MINUTE=10
+      - LEARNING_TOP_N=20
+      - LEARNING_HORIZON=20
+      - LEARNING_LABEL_HORIZONS=5,20,60
+      - LEARNING_LOOKBACK_RUNS=60
+      - LEARNING_MIN_LABELED_ROWS=200
+      - LEARNING_AUTO_APPLY=true
+      - LEARNING_REFRESH_BEFORE_RUN=true
+      - LEARNING_RUN_ON_START=false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/api/health"]

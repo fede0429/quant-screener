@@ -7,7 +7,7 @@
 
 const Charts = (() => {
 
-  // ─── Color palette ────────────────────────────────────────────────────────
+  // ─── Color palette ────────────────────────────────────────────────────
   const C = {
     blue: '#3B82F6',
     blueDim: 'rgba(59,130,246,0.15)',
@@ -32,7 +32,7 @@ const Charts = (() => {
     '#A78BFA','#FB7185'
   ];
 
-  // ─── Shared Chart.js defaults ─────────────────────────────────────────────
+  // ─── Shared Chart.js defaults ────────────────────────────────────────────
   function getBaseOptions(opts = {}) {
     return {
       responsive: true,
@@ -93,7 +93,7 @@ const Charts = (() => {
     };
   }
 
-  // ─── Registry to track instances ─────────────────────────────────────────
+  // ─── Registry to track instances ──────────────────────────────────────
   const _charts = {};
 
   function destroyChart(id) {
@@ -112,7 +112,7 @@ const Charts = (() => {
     return chart;
   }
 
-  // ─── Price Line Chart (Stock Analysis) ───────────────────────────────────
+  // ─── Price Line Chart (Stock Analysis) ─────────────────────────────────
 
   function renderPriceChart(canvasId, prices, technicals) {
     // Use last 250 days
@@ -206,7 +206,7 @@ const Charts = (() => {
     });
   }
 
-  // ─── Volume Bar Chart ─────────────────────────────────────────────────────
+  // ─── Volume Bar Chart ─────────────────────────────────────────────────
 
   function renderVolumeChart(canvasId, prices) {
     const recent = prices.slice(-250);
@@ -242,7 +242,7 @@ const Charts = (() => {
     });
   }
 
-  // ─── Quarterly Revenue/Income Bar Chart ───────────────────────────────────
+  // ─── Quarterly Revenue/Income Bar Chart ──────────────────────────────────
 
   function renderQuarterlyChart(canvasId, quarters) {
     if (!quarters || quarters.length === 0) return;
@@ -283,7 +283,7 @@ const Charts = (() => {
     });
   }
 
-  // ─── MACD Chart ───────────────────────────────────────────────────────────
+  // ─── MACD Chart ─────────────────────────────────────────────────────────
 
   function renderMACDChart(canvasId, prices) {
     const recent = prices.slice(-120);
@@ -357,7 +357,7 @@ const Charts = (() => {
     });
   }
 
-  // ─── Sector Donut Chart ───────────────────────────────────────────────────
+  // ─── Sector Donut Chart ────────────────────────────────────────────────
 
   function renderSectorChart(canvasId, sectorDist) {
     if (!sectorDist || sectorDist.length === 0) return;
@@ -424,7 +424,7 @@ const Charts = (() => {
     });
   }
 
-  // ─── Score Histogram ──────────────────────────────────────────────────────
+  // ─── Score Histogram ───────────────────────────────────────────────────
 
   function renderScoreHistogram(canvasId, histogram) {
     const options = getBaseOptions({ animDuration: 600 });
@@ -458,7 +458,7 @@ const Charts = (() => {
     });
   }
 
-  // ─── Equity Curve Chart (Backtest) ────────────────────────────────────────
+  // ─── Equity Curve Chart (Backtest) ─────────────────────────────────────────
 
   function renderEquityChart(canvasId, equityCurve) {
     const labels = equityCurve.map(p => p.date.slice(0, 7));
@@ -512,7 +512,7 @@ const Charts = (() => {
     });
   }
 
-  // ─── RSI Chart ────────────────────────────────────────────────────────────
+  // ─── RSI Chart ──────────────────────────────────────────────────────────
 
   function renderRSIChart(canvasId, prices) {
     const recent = prices.slice(-60);
@@ -591,7 +591,7 @@ const Charts = (() => {
     });
   }
 
-  // ─── Public API ───────────────────────────────────────────────────────────
+  // ─── Public API ───────────────────────────────────────────────────
 
   return {
     renderPriceChart,

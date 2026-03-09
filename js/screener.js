@@ -7,7 +7,7 @@
 
 const Screener = (() => {
 
-  // ─── Percentile helpers ───────────────────────────────────────────────────
+  // ─── Percentile helpers ────────────────────────────────────────────────
 
   /**
    * Compute the percentile rank of a value within an array.
@@ -52,7 +52,7 @@ const Screener = (() => {
     return z >= 0 ? cdf : 1 - cdf;
   }
 
-  // ─── Extract universe values ───────────────────────────────────────────────
+  // ─── Extract universe values ──────────────────────────────────────────────
 
   function extractValues(stocks, field) {
     return stocks.map(s => {
@@ -63,7 +63,7 @@ const Screener = (() => {
     });
   }
 
-  // ─── Main Scoring ──────────────────────────────────────────────────────────
+  // ─── Main Scoring ───────────────────────────────────────────────────
 
   /**
    * Score a single stock against the full universe.
@@ -73,7 +73,7 @@ const Screener = (() => {
     const f = stock.financials;
     const t = stock.technicals;
 
-    // ── VALUE SCORE ──────────────────────────────────────────────────────────
+    // ── VALUE SCORE ────────────────────────────────────────────────
     // PE: lower is better
     const peVals = extractValues(universe, 'financials.pe');
     const peScore = computeFactorScore(peVals, f.pe, false);
@@ -92,7 +92,7 @@ const Screener = (() => {
 
     const valueScore = clamp((peScore * 0.35 + pbScore * 0.30 + divScore * 0.20 + psScore * 0.15), 0, 100);
 
-    // ── GROWTH SCORE ─────────────────────────────────────────────────────────
+    // ── GROWTH SCORE ───────────────────────────────────────────────
     const revGrowthVals = extractValues(universe, 'financials.revenue_growth_yoy');
     const revGrowthScore = computeFactorScore(revGrowthVals, f.revenue_growth_yoy, true);
 
@@ -104,7 +104,7 @@ const Screener = (() => {
 
     const growthScore = clamp((revGrowthScore * 0.40 + netIncomeScore * 0.35 + roeScore * 0.25), 0, 100);
 
-    // ── QUALITY SCORE ────────────────────────────────────────────────────────
+    // ── QUALITY SCORE ──────────────────────────────────────────────
     const grossMarginVals = extractValues(universe, 'financials.gross_margin');
     const grossMarginScore = computeFactorScore(grossMarginVals, f.gross_margin, true);
 
@@ -119,7 +119,7 @@ const Screener = (() => {
 
     const qualityScore = clamp((grossMarginScore * 0.30 + debtScore * 0.25 + currentRatioScore * 0.25 + fcfScore * 0.20), 0, 100);
 
-    // ── MOMENTUM SCORE ───────────────────────────────────────────────────────
+    // ── MOMENTUM SCORE ──────────────────────────────────────────────
     const mom20Vals = extractValues(universe, 'technicals.momentum_20d');
     const mom20Score = computeFactorScore(mom20Vals, t.momentum_20d, true);
 
@@ -137,7 +137,7 @@ const Screener = (() => {
 
     const momentumScore = clamp((mom20Score * 0.35 + mom60Score * 0.30 + rsiScore * 0.20 + volRatioScore * 0.15), 0, 100);
 
-    // ── COMPOSITE ────────────────────────────────────────────────────────────
+    // ── COMPOSITE ───────────────────────────────────────────────────
     const w = normalizeWeights(weights);
     const compositeScore = clamp(
       valueScore * w.value +
@@ -172,7 +172,7 @@ const Screener = (() => {
     return Math.max(min, Math.min(max, val));
   }
 
-  // ─── Filter logic ──────────────────────────────────────────────────────────
+  // ─── Filter logic ───────────────────────────────────────────────────
 
   function applyFilters(stocks, filters) {
     return stocks.filter(s => {
@@ -212,7 +212,7 @@ const Screener = (() => {
     });
   }
 
-  // ─── Main screening function ──────────────────────────────────────────────
+  // ─── Main screening function ─────────────────────────────────────────────
 
   /**
    * Run the full screening pipeline.
@@ -244,7 +244,7 @@ const Screener = (() => {
     return scored;
   }
 
-  // ─── Stats helpers ────────────────────────────────────────────────────────
+  // ─── Stats helpers ────────────────────────────────────────────────
 
   function computeStats(scoredStocks) {
     if (!scoredStocks.length) return { count: 0, avgScore: 0, avgPE: 0, avgROE: 0 };
@@ -283,7 +283,7 @@ const Screener = (() => {
     }));
   }
 
-  // ─── Score stocks at a historical point in time ───────────────────────────
+  // ─── Score stocks at a historical point in time ──────────────────────────────
   // Used by backtest — score using historical prices at a given index
 
   function scoreAtDate(stocks, priceIdx, weights) {
@@ -317,7 +317,7 @@ const Screener = (() => {
     }).sort((a, b) => b.compositeScore - a.compositeScore);
   }
 
-  // ─── Public API ───────────────────────────────────────────────────────────
+  // ─── Public API ───────────────────────────────────────────────────
 
   return {
     runScreener,

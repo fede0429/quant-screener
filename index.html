@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>A股量化选股系统</title>
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v=20260305b">
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -130,6 +130,11 @@
       justify-content: center;
       gap: var(--space-4);
       z-index: 9999;
+      transition: opacity 0.4s ease;
+    }
+    #app-loading.fade-out {
+      opacity: 0;
+      pointer-events: none;
     }
 
     #app-loading .app-title-lg {
@@ -175,7 +180,7 @@
 <!-- ═══════════════════════════════════════════════════════ -->
 <!-- APP-LEVEL LOADING OVERLAY                               -->
 <!-- ═══════════════════════════════════════════════════════ -->
-<div id="app-loading" id="loading-overlay">
+<div id="app-loading">
   <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-label="logo">
     <rect x="4" y="8" width="8" height="32" rx="2" fill="#3B82F6" opacity="0.5"/>
     <rect x="16" y="16" width="8" height="24" rx="2" fill="#3B82F6" opacity="0.7"/>
@@ -979,26 +984,51 @@
 </div><!-- /#app -->
 
 <!-- Scripts -->
-<script src="js/api_client.js"></script>
-<script src="js/screener.js"></script>
-<script src="js/backtest.js"></script>
-<script src="js/charts.js"></script>
-<script src="js/app.js"></script>
+<script src="js/api_client.js?v=20260305b"></script>
+<script src="js/screener.js?v=20260305b"></script>
+<script src="js/backtest.js?v=20260305b"></script>
+<script src="js/charts.js?v=20260305b"></script>
+<script src="js/app.js?v=20260305b"></script>
 
+<!-- Failsafe: remove overlay even if scripts fail -->
 <script>
-  // Hide app loading overlay after data loads
-  // (app.js calls this internally but as fallback)
-  window.addEventListener('load', () => {
-    setTimeout(() => {
-      const overlay = document.getElementById('app-loading');
-      if (overlay && overlay.style.display !== 'none') {
-        overlay.style.opacity = '0';
-        overlay.style.transition = 'opacity 0.3s';
-        setTimeout(() => overlay.remove(), 300);
-      }
-    }, 5000);
+(function() {
+  // Failsafe overlay removal
+  setTimeout(function() {
+    var o = document.getElementById('app-loading');
+    if (o) { o.classList.add('fade-out'); setTimeout(function(){ if(o.parentNode) o.parentNode.removeChild(o); }, 500); }
+  }, 2500);
+
+  // On-page debug panel (bottom-right corner) — shows JS errors and log messages
+  var panel = document.createElement('div');
+  panel.id = 'debug-panel';
+  panel.style.cssText = 'position:fixed;bottom:0;right:0;width:380px;max-height:180px;overflow-y:auto;background:rgba(0,0,0,0.88);color:#0f0;font:11px/1.5 monospace;padding:6px 8px;z-index:99999;border-top-left-radius:8px;pointer-events:auto;';
+  panel.innerHTML = '<div style="color:#888;font-size:10px;margin-bottom:2px">Debug Panel (v20260305b) — 点击此处关闭</div>';
+  panel.querySelector('div').onclick = function(){ panel.style.display='none'; };
+  document.body.appendChild(panel);
+
+  function debugLog(msg, color) {
+    var line = document.createElement('div');
+    line.style.color = color || '#0f0';
+    line.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+    panel.appendChild(line);
+    panel.scrollTop = panel.scrollHeight;
+  }
+  window._debugLog = debugLog;
+
+  // Capture errors
+  window.onerror = function(msg, src, line) {
+    debugLog('ERROR: ' + msg + ' (line ' + line + ')', '#f44');
+  };
+  window.addEventListener('unhandledrejection', function(e) {
+    debugLog('REJECT: ' + (e.reason && e.reason.message || e.reason), '#f80');
   });
+
+  debugLog('Debug panel initialized');
+})();
 </script>
+
+
 
 </body>
 </html>

@@ -1,6 +1,8 @@
 """
 Tushare Pro 数据获取模块
 负责从 Tushare API 拉取 A 股数据并存入 SQLite 缓存
+
+新增: 带回调的方法用于后台刷新进度上报
 """
 import logging
 import time
@@ -49,41 +51,194 @@ class TushareDataFetcher:
         if not self.pro:
             raise RuntimeError("Tushare 未连接，请先设置 Token")
 
-    # ─── 核心刷新流程 ────────────────────────────────────────────────────
+    # ─── 核心刷新流程（旧接口，保留兼容） ──────────────────────────
     def refresh_all(self, full_refresh: bool = False) -> dict:
         """
-        全量或增量刷新数据
-        full_refresh=True: 股票列表 + 3年日线 + 财务报表 + 估值指标 + 沪深300
-        full_refresh=False: 只更新最近行情 + 估值指标
+        全量或增量刷新数据（同步，适合直接调用）
         """
         self._ensure_connected()
         stats = {}
-
-        # 1. 股票列表（始终刷新）
         stats["stocks"] = self._fetch_stock_list()
 
-        # 2. 日线行情
         if full_refresh:
             stats["prices"] = self._fetch_all_prices(days=750)
         else:
             stats["prices"] = self._fetch_incremental_prices()
 
-        # 3. 财务数据（仅全量刷新时拉取，因为耗时长）
         if full_refresh:
             stats["financials"] = self._fetch_financials()
 
-        # 4. 估值指标（每次都刷新）
-        stats["indicators"] = self._fetch_indicators()
-
-        # 5. 沪深300基准
+        stats["indicators"] = self._fetch_indicators(
+            days=750 if full_refresh else 180,
+            full_refresh=full_refresh
+        )
         stats["benchmark"] = self._fetch_benchmark(days=750 if full_refresh else 60)
-
-        # 记录刷新时间
         self.db.save_setting("last_refresh", datetime.now().isoformat())
-
         return stats
 
-    # ─── 股票列表 ─────────────────────────────────────────────────────
+    # ─── 带回调的分步方法（后台刷新用） ────────────────────────────
+    def refresh_all_step_stocks(self) -> dict:
+        """仅获取股票列表（第一步）"""
+        self._ensure_connected()
+        return self._fetch_stock_list()
+
+    def fetch_all_prices_with_callback(self, days: int = 750, callback=None) -> dict:
+        """全量拉取行情，带进度回调"""
+        self._ensure_connected()
+        logger.info(f"📈 全量获取日线行情（最近 {days} 天）...")
+        stocks = self.db.get_all_stocks()
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=int(days * 1.5))).strftime("%Y%m%d")
+
+        total_records = 0
+        errors = 0
+        n = len(stocks)
+        for i, stock in enumerate(stocks):
+            code = stock["code"]
+            try:
+                df = self.pro.daily(
+                    ts_code=code,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                if df is not None and not df.empty:
+                    prices = []
+                    for _, row in df.iterrows():
+                        prices.append({
+                            "code": code,
+                            "trade_date": row["trade_date"],
+                            "open": row.get("open"),
+                            "high": row.get("high"),
+                            "low": row.get("low"),
+                            "close": row.get("close"),
+                            "volume": row.get("vol"),
+                            "amount": row.get("amount"),
+                            "pct_chg": row.get("pct_chg"),
+                            "turnover": row.get("turnover_rate", 0) if "turnover_rate" in row.index else 0,
+                        })
+                    self.db.upsert_prices(prices)
+                    total_records += len(prices)
+
+                if (i + 1) % 50 == 0:
+                    logger.info(f"   进度: {i+1}/{n} 只, 共 {total_records} 条")
+                    self.db.conn.commit()
+                    if callback:
+                        callback(i + 1, n, total_records)
+
+                time.sleep(RATE_LIMIT_DELAY)
+
+            except Exception as e:
+                errors += 1
+                logger.warning(f"   ⚠ {code} 行情获取失败: {e}")
+                time.sleep(1)
+
+        logger.info(f"   ✅ 行情获取完成: {total_records} 条, {errors} 个错误")
+        return {"records": total_records, "errors": errors}
+
+    def fetch_financials_with_callback(self, callback=None) -> dict:
+        """获取财务数据，带进度回调"""
+        self._ensure_connected()
+        logger.info("📊 获取财务数据...")
+        stocks = self.db.get_all_stocks()
+        n = len(stocks)
+        total = 0
+        errors = 0
+
+        for i, stock in enumerate(stocks):
+            code = stock["code"]
+            try:
+                # 利润表
+                income = self.pro.income(ts_code=code, fields=(
+                    'ts_code,ann_date,f_ann_date,end_date,revenue,n_income,total_profit,'
+                    'operate_profit,ebit'
+                ))
+                time.sleep(RATE_LIMIT_DELAY)
+
+                # 资产负债表
+                balance = self.pro.balancesheet(ts_code=code, fields=(
+                    'ts_code,ann_date,f_ann_date,end_date,total_assets,total_liab,'
+                    'total_hldr_eqy_exc_min_int'
+                ))
+                time.sleep(RATE_LIMIT_DELAY)
+
+                # 现金流量表
+                cashflow = self.pro.cashflow(ts_code=code, fields=(
+                    'ts_code,ann_date,f_ann_date,end_date,n_cashflow_act,free_cashflow'
+                ))
+                time.sleep(RATE_LIMIT_DELAY)
+
+                # 合并
+                records = []
+                if income is not None and not income.empty:
+                    for _, row in income.iterrows():
+                        ed = row["end_date"]
+                        bal = None
+                        cf = None
+                        if balance is not None and not balance.empty:
+                            match = balance[balance["end_date"] == ed]
+                            if not match.empty:
+                                bal = match.iloc[0]
+                        if cashflow is not None and not cashflow.empty:
+                            match = cashflow[cashflow["end_date"] == ed]
+                            if not match.empty:
+                                cf = match.iloc[0]
+
+                        ta = bal["total_assets"] if bal is not None and "total_assets" in bal.index else None
+                        tl = bal["total_liab"] if bal is not None and "total_liab" in bal.index else None
+                        se = bal["total_hldr_eqy_exc_min_int"] if bal is not None and "total_hldr_eqy_exc_min_int" in bal.index else None
+                        ocf = cf["n_cashflow_act"] if cf is not None and "n_cashflow_act" in cf.index else None
+                        fcf = cf["free_cashflow"] if cf is not None and "free_cashflow" in cf.index else None
+                        ann_date = row.get("ann_date")
+                        f_ann_date = row.get("f_ann_date")
+                        if not ann_date and bal is not None:
+                            ann_date = bal.get("ann_date")
+                        if not ann_date and cf is not None:
+                            ann_date = cf.get("ann_date")
+                        if not f_ann_date and bal is not None:
+                            f_ann_date = bal.get("f_ann_date")
+                        if not f_ann_date and cf is not None:
+                            f_ann_date = cf.get("f_ann_date")
+
+                        ni = row.get("n_income")
+                        roe = (ni / se * 100) if ni and se and se != 0 else None
+
+                        records.append({
+                            "code": code,
+                            "end_date": ed,
+                            "ann_date": ann_date,
+                            "f_ann_date": f_ann_date,
+                            "revenue": row.get("revenue"),
+                            "net_income": ni,
+                            "gross_profit": row.get("total_profit"),
+                            "total_assets": ta,
+                            "total_liabilities": tl,
+                            "shareholders_equity": se,
+                            "operating_cash_flow": ocf,
+                            "free_cash_flow": fcf,
+                            "eps": None,
+                            "bps": None,
+                            "roe": round(roe, 2) if roe else None,
+                            "extra_json": None,
+                        })
+
+                if records:
+                    self.db.upsert_financials(records)
+                    total += len(records)
+
+                if (i + 1) % 20 == 0:
+                    logger.info(f"   财务进度: {i+1}/{n} 只")
+                    if callback:
+                        callback(i + 1, n)
+
+            except Exception as e:
+                errors += 1
+                logger.warning(f"   ⚠ {code} 财务获取失败: {e}")
+                time.sleep(2)
+
+        logger.info(f"   ✅ 财务数据: {total} 条, {errors} 个错误")
+        return {"records": total, "errors": errors}
+
+    # ─── 股票列表 ───────────────────────────────────────────────
     def _fetch_stock_list(self) -> dict:
         """获取 A 股股票列表"""
         logger.info("📋 获取 A 股股票列表...")
@@ -96,7 +251,6 @@ class TushareDataFetcher:
             if df is None or df.empty:
                 return {"count": 0, "error": "未获取到数据"}
 
-            # 映射 Tushare 的行业到板块
             sector_map = self._build_sector_map()
 
             stocks = []
@@ -128,8 +282,8 @@ class TushareDataFetcher:
             "互联网金融": "金融",
             # 消费
             "白酒": "消费", "食品饮料": "消费", "家电": "消费", "调味品": "消费",
-            "乳制品": "消费", "免税": "消费", "零售": "消费", "纶织服装": "消费",
-            "家居用品": "消费", "鄯酒行业": "消费", "食品加工": "消费", "饮料制造": "消费",
+            "乳制品": "消费", "免税": "消费", "零售": "消费", "纵织服装": "消费",
+            "家居用品": "消费", "酥酒行业": "消费", "食品加工": "消费", "饮料制造": "消费",
             "家用电器": "消费", "商业百货": "消费", "旅游酒店": "消费",
             # 科技
             "半导体": "科技", "电子": "科技", "软件": "科技", "通信": "科技",
@@ -146,8 +300,8 @@ class TushareDataFetcher:
             "新能源": "新能源", "储能": "新能源", "锂矿": "新能源",
             "新能源汽车": "新能源",
             # 资源
-            "黄金": "资源", "煞炭": "资源", "有色金属": "资源", "石油": "资源",
-            "稀土": "资源", "锤锂": "资源", "采掘": "资源",
+            "黄金": "资源", "煎炭": "资源", "有色金属": "资源", "石油": "资源",
+            "稀土": "资源", "钓铁": "资源", "采掘": "资源",
             # 制造
             "工程机械": "制造", "化工": "制造", "汽车": "制造", "工控": "制造",
             "机械设备": "制造", "汽车配件": "制造", "军工": "制造",
@@ -167,55 +321,10 @@ class TushareDataFetcher:
             "传媒": "传媒", "广告": "传媒", "影视": "传媒", "出版": "传媒",
         }
 
-    # ─── 日线行情 ─────────────────────────────────────────────────────
+    # ─── 日线行情（旧接口） ─────────────────────────────────────
     def _fetch_all_prices(self, days: int = 750) -> dict:
         """全量拉取所有股票日线（分批）"""
-        logger.info(f"📈 全量获取日线行情（最近 {days} 天）...")
-        stocks = self.db.get_all_stocks()
-        end_date = datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.now() - timedelta(days=int(days * 1.5))).strftime("%Y%m%d")
-
-        total = 0
-        errors = 0
-        for i, stock in enumerate(stocks):
-            code = stock["code"]
-            try:
-                df = self.pro.daily(
-                    ts_code=code,
-                    start_date=start_date,
-                    end_date=end_date
-                )
-                if df is not None and not df.empty:
-                    prices = []
-                    for _, row in df.iterrows():
-                        prices.append({
-                            "code": code,
-                            "trade_date": row["trade_date"],
-                            "open": row.get("open"),
-                            "high": row.get("high"),
-                            "low": row.get("low"),
-                            "close": row.get("close"),
-                            "volume": row.get("vol"),
-                            "amount": row.get("amount"),
-                            "pct_chg": row.get("pct_chg"),
-                            "turnover": row.get("turnover_rate", 0) if "turnover_rate" in row.index else 0,
-                        })
-                    self.db.upsert_prices(prices)
-                    total += len(prices)
-
-                if (i + 1) % 50 == 0:
-                    logger.info(f"   进度: {i+1}/{len(stocks)} 只, 共 {total} 条")
-                    self.db.conn.commit()
-
-                time.sleep(RATE_LIMIT_DELAY)
-
-            except Exception as e:
-                errors += 1
-                logger.warning(f"   ⚠ {code} 行情获取失败: {e}")
-                time.sleep(1)
-
-        logger.info(f"   ✅ 行情获取完成: {total} 条, {errors} 个错误")
-        return {"records": total, "errors": errors}
+        return self.fetch_all_prices_with_callback(days=days, callback=None)
 
     def _fetch_incremental_prices(self) -> dict:
         """增量拉取：只获取最近缺失的行情"""
@@ -263,127 +372,25 @@ class TushareDataFetcher:
         logger.info(f"   ✅ 增量更新: {total} 条")
         return {"records": total}
 
-    # ─── 财务数据 ─────────────────────────────────────────────────────
+    # ─── 财务数据（旧接口） ────────────────────────────────────
     def _fetch_financials(self) -> dict:
-        """获取财务报表数据（利润表 + 资产负债表 + 现金流量表）"""
-        logger.info("📊 获取财务数据...")
-        stocks = self.db.get_all_stocks()
+        """获取财务报表数据"""
+        return self.fetch_financials_with_callback(callback=None)
 
-        # 获取最近 3 年的报告期
-        periods = []
-        for year in range(datetime.now().year - 3, datetime.now().year + 1):
-            for q in ["0331", "0630", "0930", "1231"]:
-                periods.append(f"{year}{q}")
+    # ─── 估值指标 ───────────────────────────────────────────────
+    def _fetch_indicators(self, days: int = 180, full_refresh: bool = False) -> dict:
+        """Fetch historical daily_basic data and sync the latest indicator snapshot."""
+        history_result = self._fetch_indicator_history(days=days, full_refresh=full_refresh)
+        latest_trade_date = history_result.get("latest_trade_date") or self.db.get_latest_indicator_history_date()
+        latest_records = history_result.get("latest_records") or []
 
-        total = 0
-        errors = 0
-        for i, stock in enumerate(stocks):
-            code = stock["code"]
-            try:
-                # 利润表
-                income = self.pro.income(ts_code=code, fields=(
-                    'ts_code,end_date,revenue,n_income,total_profit,'
-                    'operate_profit,ebit'
-                ))
-                time.sleep(RATE_LIMIT_DELAY)
+        if not latest_records and latest_trade_date:
+            latest_records = list(self.db.get_indicator_snapshot_map(latest_trade_date).values())
 
-                # 资产负债表
-                balance = self.pro.balancesheet(ts_code=code, fields=(
-                    'ts_code,end_date,total_assets,total_liab,'
-                    'total_hldr_eqy_exc_min_int'
-                ))
-                time.sleep(RATE_LIMIT_DELAY)
-
-                # 现金流量表
-                cashflow = self.pro.cashflow(ts_code=code, fields=(
-                    'ts_code,end_date,n_cashflow_act,free_cashflow'
-                ))
-                time.sleep(RATE_LIMIT_DELAY)
-
-                # 合并
-                records = []
-                if income is not None and not income.empty:
-                    for _, row in income.iterrows():
-                        ed = row["end_date"]
-                        bal = None
-                        cf = None
-                        if balance is not None and not balance.empty:
-                            match = balance[balance["end_date"] == ed]
-                            if not match.empty:
-                                bal = match.iloc[0]
-                        if cashflow is not None and not cashflow.empty:
-                            match = cashflow[cashflow["end_date"] == ed]
-                            if not match.empty:
-                                cf = match.iloc[0]
-
-                        ta = bal["total_assets"] if bal is not None and "total_assets" in bal.index else None
-                        tl = bal["total_liab"] if bal is not None and "total_liab" in bal.index else None
-                        se = bal["total_hldr_eqy_exc_min_int"] if bal is not None and "total_hldr_eqy_exc_min_int" in bal.index else None
-                        ocf = cf["n_cashflow_act"] if cf is not None and "n_cashflow_act" in cf.index else None
-                        fcf = cf["free_cashflow"] if cf is not None and "free_cashflow" in cf.index else None
-
-                        ni = row.get("n_income")
-                        roe = (ni / se * 100) if ni and se and se != 0 else None
-
-                        records.append({
-                            "code": code,
-                            "end_date": ed,
-                            "revenue": row.get("revenue"),
-                            "net_income": ni,
-                            "gross_profit": row.get("total_profit"),
-                            "total_assets": ta,
-                            "total_liabilities": tl,
-                            "shareholders_equity": se,
-                            "operating_cash_flow": ocf,
-                            "free_cash_flow": fcf,
-                            "eps": None,
-                            "bps": None,
-                            "roe": round(roe, 2) if roe else None,
-                            "extra_json": None,
-                        })
-
-                if records:
-                    self.db.upsert_financials(records)
-                    total += len(records)
-
-                if (i + 1) % 20 == 0:
-                    logger.info(f"   进度: {i+1}/{len(stocks)} 只")
-
-            except Exception as e:
-                errors += 1
-                logger.warning(f"   ⚠ {code} 财务获取失败: {e}")
-                time.sleep(2)
-
-        logger.info(f"   ✅ 财务数据: {total} 条, {errors} 个错误")
-        return {"records": total, "errors": errors}
-
-    # ─── 估值指标 ─────────────────────────────────────────────────────
-    def _fetch_indicators(self) -> dict:
-        """获取最新的 PE/PB/PS 等估值指标（daily_basic）"""
-        logger.info("📐 获取估值指标...")
-        try:
-            # Tushare daily_basic 支持按日期获取全市场指标
-            trade_date = datetime.now().strftime("%Y%m%d")
-            df = self.pro.daily_basic(
-                trade_date=trade_date,
-                fields='ts_code,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,total_mv,circ_mv'
-            )
-
-            # 如果当天没数据（非交易日），往前查
-            attempts = 0
-            while (df is None or df.empty) and attempts < 10:
-                trade_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
-                df = self.pro.daily_basic(trade_date=trade_date, fields='ts_code,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,total_mv,circ_mv')
-                attempts += 1
-                time.sleep(RATE_LIMIT_DELAY)
-
-            if df is None or df.empty:
-                return {"count": 0, "error": "无法获取估值指标"}
-
-            records = []
-            for _, row in df.iterrows():
-                records.append({
-                    "code": row["ts_code"],
+        if latest_records:
+            self.db.upsert_indicators([
+                {
+                    "code": row["code"],
                     "pe": row.get("pe"),
                     "pe_ttm": row.get("pe_ttm"),
                     "pb": row.get("pb"),
@@ -393,17 +400,122 @@ class TushareDataFetcher:
                     "dv_ttm": row.get("dv_ttm"),
                     "total_mv": row.get("total_mv"),
                     "circ_mv": row.get("circ_mv"),
-                })
+                }
+                for row in latest_records
+            ])
 
-            self.db.upsert_indicators(records)
-            logger.info(f"   ✅ 估值指标: {len(records)} 只")
-            return {"count": len(records), "trade_date": trade_date}
+        return {
+            "count": len(latest_records),
+            "trade_date": latest_trade_date,
+            "history_rows": history_result.get("records", 0),
+            "history_trade_dates": history_result.get("trade_dates", 0),
+            "errors": history_result.get("errors", 0),
+        }
 
-        except Exception as e:
-            logger.error(f"估值指标获取失败: {e}")
-            return {"count": 0, "error": str(e)}
+    def _fetch_indicator_history(self, days: int = 180, full_refresh: bool = False) -> dict:
+        self._ensure_connected()
+        logger.info("📐 Fetching indicator history...")
 
-    # ─── 沪深300基准 ────────────────────────────────────────────────────
+        latest_history_date = None if full_refresh else self.db.get_latest_indicator_history_date()
+        end_date = datetime.now().strftime("%Y%m%d")
+        if latest_history_date:
+            start_date = (datetime.strptime(latest_history_date, "%Y%m%d") + timedelta(days=1)).strftime("%Y%m%d")
+        else:
+            start_date = (datetime.now() - timedelta(days=int(days * 1.6))).strftime("%Y%m%d")
+
+        if start_date > end_date:
+            logger.info("   ℹ indicator history already up to date")
+            return {
+                "records": 0,
+                "trade_dates": 0,
+                "errors": 0,
+                "latest_trade_date": latest_history_date,
+                "latest_records": [],
+            }
+
+        trade_dates = self._get_open_trade_dates(start_date, end_date)
+        if not trade_dates:
+            return {
+                "records": 0,
+                "trade_dates": 0,
+                "errors": 0,
+                "latest_trade_date": latest_history_date,
+                "latest_records": [],
+            }
+
+        total_records = 0
+        error_count = 0
+        successful_dates = 0
+        latest_trade_date = latest_history_date
+        latest_records = []
+        for trade_date in trade_dates:
+            try:
+                df = self.pro.daily_basic(
+                    trade_date=trade_date,
+                    fields='ts_code,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,total_mv,circ_mv'
+                )
+                if df is None or df.empty:
+                    time.sleep(RATE_LIMIT_DELAY)
+                    continue
+
+                records = []
+                for _, row in df.iterrows():
+                    records.append({
+                        "code": row["ts_code"],
+                        "trade_date": trade_date,
+                        "pe": row.get("pe"),
+                        "pe_ttm": row.get("pe_ttm"),
+                        "pb": row.get("pb"),
+                        "ps": row.get("ps"),
+                        "ps_ttm": row.get("ps_ttm"),
+                        "dv_ratio": row.get("dv_ratio"),
+                        "dv_ttm": row.get("dv_ttm"),
+                        "total_mv": row.get("total_mv"),
+                        "circ_mv": row.get("circ_mv"),
+                    })
+
+                self.db.upsert_indicator_history(records)
+                total_records += len(records)
+                successful_dates += 1
+                latest_trade_date = trade_date
+                latest_records = records
+                time.sleep(RATE_LIMIT_DELAY)
+
+            except Exception as exc:
+                error_count += 1
+                logger.warning("   ⚠ indicator history failed for %s: %s", trade_date, exc)
+                time.sleep(1)
+
+        logger.info(
+            "   ✅ indicator history: %s rows across %s trade dates",
+            total_records,
+            successful_dates,
+        )
+        return {
+            "records": total_records,
+            "trade_dates": successful_dates,
+            "errors": error_count,
+            "latest_trade_date": latest_trade_date,
+            "latest_records": latest_records,
+        }
+
+    def _get_open_trade_dates(self, start_date: str, end_date: str) -> list[str]:
+        df = self.pro.trade_cal(
+            exchange='SSE',
+            start_date=start_date,
+            end_date=end_date,
+            fields='cal_date,is_open'
+        )
+        if df is None or df.empty:
+            return []
+
+        result = []
+        for _, row in df.iterrows():
+            if str(row.get("is_open")) == "1":
+                result.append(row["cal_date"])
+        return sorted(result)
+
+    # ─── 沪深300基准 ──────────────────────────────────────────────
     def _fetch_benchmark(self, days: int = 750) -> dict:
         """获取沪深300指数日线"""
         logger.info("📊 获取沪深300基准...")

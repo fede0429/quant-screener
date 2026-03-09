@@ -7,7 +7,7 @@
 
 const Backtest = (() => {
 
-  // ─── Date / index helpers ─────────────────────────────────────────────────
+  // ─── Date / index helpers ───────────────────────────────────────────────
 
   function dateToStr(d) {
     return d.toISOString().split('T')[0];
@@ -67,7 +67,7 @@ const Backtest = (() => {
     return result;
   }
 
-  // ─── Main Backtest ────────────────────────────────────────────────────────
+  // ─── Main Backtest ───────────────────────────────────────────────────
 
   /**
    * Run the backtest.
@@ -101,7 +101,7 @@ const Backtest = (() => {
       benchPriceByDate[p.date] = p;
     }
 
-    // ── Equity Curve ─────────────────────────────────────────────────────────
+    // ── Equity Curve ───────────────────────────────────────────────────
     let portfolioValue = 100;
     let benchmarkValue = 100;
 
@@ -184,7 +184,7 @@ const Backtest = (() => {
     // Prepend start point
     equityCurve.unshift({ date: startDate, portfolio: 100, benchmark: 100 });
 
-    // ── Performance Metrics ───────────────────────────────────────────────────
+    // ── Performance Metrics ─────────────────────────────────────────────────
 
     const totalReturn = (portfolioValue - 100) / 100;
     const benchTotalReturn = (benchmarkValue - 100) / 100;
@@ -270,7 +270,7 @@ const Backtest = (() => {
     return monthly;
   }
 
-  // ─── Public API ───────────────────────────────────────────────────────────
+  // ─── Public API ───────────────────────────────────────────────────
 
   return {
     run,

@@ -36,10 +36,10 @@ const ApiClient = (() => {
   }
 
   return {
-    // ─── Health ──────────────────────────────────────────
+    // ─── Health ──────────────────────────────────────────────
     health: () => request('/api/health'),
 
-    // ─── Token ──────────────────────────────────────────
+    // ─── Token ──────────────────────────────────────────────
     setToken: (token) => request('/api/token', {
       method: 'POST',
       body: { token }
@@ -47,37 +47,39 @@ const ApiClient = (() => {
 
     getTokenStatus: () => request('/api/token/status'),
 
-    // ─── Data ───────────────────────────────────────────
+    // ─── Data ───────────────────────────────────────────────
     refreshData: (full = false) => request(`/api/data/refresh?full=${full}`, {
       method: 'POST'
     }),
 
+    refreshStatus: () => request('/api/data/refresh/status'),
+
     getDataStatus: () => request('/api/data/status'),
 
-    // ─── Stocks ─────────────────────────────────────────
+    // ─── Stocks ─────────────────────────────────────────────
     listStocks: () => request('/api/stocks'),
 
     getStockDetail: (code) => request(`/api/stocks/${encodeURIComponent(code)}`),
 
-    // ─── Screener ───────────────────────────────────────
+    // ─── Screener ───────────────────────────────────────────
     runScreener: (weights, filters = {}, sectors = []) => request('/api/screener', {
       method: 'POST',
       body: { weights, filters, sectors }
     }),
 
-    // ─── Backtest ───────────────────────────────────────
+    // ─── Backtest ───────────────────────────────────────────
     runBacktest: (params) => request('/api/backtest', {
       method: 'POST',
       body: params
     }),
 
-    // ─── Benchmark ──────────────────────────────────────
+    // ─── Benchmark ──────────────────────────────────────────
     getBenchmark: () => request('/api/benchmark'),
 
-    // ─── Sectors ────────────────────────────────────────
+    // ─── Sectors ────────────────────────────────────────────
     getSectors: () => request('/api/sectors'),
 
-    // ─── Utility ────────────────────────────────────────
+    // ─── Utility ────────────────────────────────────────────
     isAvailable: async () => {
       try {
         await request('/api/health');

@@ -1,6 +1,10 @@
 /**
  * app.js — Main Application Logic
  * A股量化选股系统
+ * 
+ * 支持两种模式:
+ *   1. 演示模式: 读取 demo_data.json 本地数据，前端计算选股/回测
+ *   2. 后端模式: 通过 API 与 Tushare 实时数据交互，后端计算选股/回测
  */
 
 'use strict';
@@ -20,7 +24,12 @@ const AppState = {
     startDate: null,
     endDate: null
   },
-  backtestResults: null
+  backtestResults: null,
+  // Backend state
+  backendConnected: false,
+  tushareConnected: false,
+  cachedStocks: 0,
+  mode: 'none' // 'demo', 'backend', 'none'
 };
 
 // ─── Number Formatting ────────────────────────────────────────────────────────
@@ -75,10 +84,15 @@ function scoreColor(score) {
 function initTabs() {
   const tabBtns = document.querySelectorAll('.tab-btn');
   const tabContents = document.querySelectorAll('.tab-content');
+  const dl = window._debugLog || function(){};
+  dl('initTabs: found ' + tabBtns.length + ' btns, ' + tabContents.length + ' contents');
 
   tabBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       const target = btn.dataset.tab;
+      dl('Tab clicked: ' + target, '#0ff');
       tabBtns.forEach(b => b.classList.toggle('active', b.dataset.tab === target));
       tabContents.forEach(c => {
         const wasActive = c.classList.contains('active');
@@ -94,6 +108,9 @@ function initTabs() {
 function onTabActivated(tab) {
   if (tab === 'analysis' && AppState.selectedStock) {
     renderStockAnalysis(AppState.selectedStock);
+  }
+  if (tab === 'settings') {
+    refreshDataStatus();
   }
 }
 
@@ -119,48 +136,562 @@ async function loadData() {
   const loadingEl = document.getElementById('app-loading');
   const statusEl = document.getElementById('loading-status');
   if (loadingEl) loadingEl.style.display = 'flex';
-  if (statusEl) statusEl.textContent = '正在加载数据...';
+  if (statusEl) statusEl.textContent = '正在连接后端...';
+
+  // Step 1: Check backend health
+  let backendOk = false;
+  let health = null;
+  try {
+    health = await ApiClient.health();
+    backendOk = true;
+    AppState.backendConnected = true;
+    AppState.tushareConnected = health.tushare_connected;
+    AppState.cachedStocks = health.cached_stocks;
+    if (statusEl) statusEl.textContent = '后端已连接，检查数据...';
+  } catch (e) {
+    AppState.backendConnected = false;
+    if (statusEl) statusEl.textContent = '后端未连接，尝试加载演示数据...';
+  }
+
+  let dataLoaded = false;
+
+  // Step 2: If backend has cached stocks, use backend mode
+  if (backendOk && health && health.cached_stocks > 0) {
+    AppState.mode = 'backend';
+    dataLoaded = true;
+    if (statusEl) statusEl.textContent = `已缓存 ${health.cached_stocks} 只股票，加载中...`;
+  }
+
+  // Step 3: Try loading demo data (works offline or as fallback)
+  if (!dataLoaded) {
+    try {
+      const response = await fetch('./data/demo_data.json');
+      if (response.ok) {
+        if (statusEl) statusEl.textContent = '解析演示数据中...';
+        const data = await response.json();
+        AppState.data = data;
+        AppState.mode = 'demo';
+        dataLoaded = true;
+      }
+    } catch (err) {
+      console.log('Demo data not available');
+    }
+  }
+
+  if (statusEl) statusEl.textContent = '初始化界面...';
+
+  // Init UI controls regardless of data
+  initWeightSliders();
+  initFilterControls();
+  initBacktestControls();
+  initSettingsControls();
+
+  if (AppState.mode === 'demo' && AppState.data) {
+    // Demo mode: local data
+    initSectorFilters(AppState.data.stocks);
+    initDatePickers(AppState.data.stocks);
+    runScreener();
+  } else if (AppState.mode === 'backend') {
+    // Backend mode: run screener via API
+    initSectorFilters([]);
+    initDatePickers([]);
+    await runScreenerFromBackend();
+  } else if (backendOk) {
+    // Backend is up but no data
+    initSectorFilters([]);
+    initDatePickers([]);
+    showBackendModeMessage();
+  } else {
+    showNoDataMessage();
+  }
+
+  // Update header badge
+  updateHeaderBadge();
+  removeOverlay();
+}
+
+function updateHeaderBadge() {
+  const badge = document.querySelector('.header-badge span');
+  const dot = document.querySelector('.badge-dot');
+  if (!badge) return;
+
+  if (AppState.mode === 'backend' && AppState.tushareConnected) {
+    badge.textContent = `Tushare Pro · ${AppState.cachedStocks} 只股票`;
+    if (dot) dot.style.background = '#10B981';
+  } else if (AppState.backendConnected) {
+    badge.textContent = 'Tushare Pro (未配置数据)';
+    if (dot) dot.style.background = '#F59E0B';
+  } else if (AppState.mode === 'demo') {
+    badge.textContent = 'Tushare Pro (Demo)';
+    if (dot) dot.style.background = '#8B5CF6';
+  } else {
+    badge.textContent = '未连接';
+    if (dot) dot.style.background = '#EF4444';
+  }
+}
+
+// ─── Backend Screener ─────────────────────────────────────────────────────────
+async function runScreenerFromBackend() {
+  const runBtn = document.getElementById('run-btn');
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.textContent = '正在选股...';
+  }
 
   try {
-    const response = await fetch('./data/demo_data.json');
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const filters = getFilters();
+    AppState.filters = filters;
 
-    if (statusEl) statusEl.textContent = '解析数据中...';
-    const data = await response.json();
-    AppState.data = data;
+    const resp = await ApiClient.runScreener(AppState.weights, filters, filters.sectors || []);
+    const results = resp.results || [];
 
-    if (statusEl) statusEl.textContent = '初始化完成';
+    // Enrich with rank
+    results.forEach((s, i) => { s.rank = i + 1; });
 
-    // Init after data load
-    initSectorFilters(data.stocks);
-    initDatePickers(data.stocks);
-    initWeightSliders();
-    initFilterControls();
-    initBacktestControls();
+    AppState.screenerResults = results;
+    renderScreenerResults(results);
 
-    // Run initial screening
-    runScreener();
+    // Update KPI from results
+    const stats = computeStatsFromResults(results);
+    renderKPICards(stats);
 
-    if (loadingEl) {
-      loadingEl.style.opacity = '0';
-      loadingEl.style.transition = 'opacity 0.4s ease';
-      setTimeout(() => { loadingEl.remove(); }, 400);
-    }
   } catch (err) {
-    console.error('数据加载失败:', err);
-    if (statusEl) statusEl.textContent = `加载失败: ${err.message}`;
-    if (loadingEl) {
-      const spinner = loadingEl.querySelector('.loading-spinner');
-      if (spinner) spinner.style.display = 'none';
+    console.error('Backend screener error:', err);
+    const tbody = document.getElementById('results-tbody');
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:3rem;color:var(--text-secondary,#888);">
+        <div style="font-size:1.25rem;margin-bottom:0.5rem;">选股失败</div>
+        <div>${err.message || '请先在「Tushare 配置」中刷新数据'}</div>
+      </td></tr>`;
     }
+  }
+
+  if (runBtn) {
+    runBtn.disabled = false;
+    runBtn.textContent = '开始选股';
+  }
+}
+
+function computeStatsFromResults(results) {
+  if (!results.length) return { count: 0, avgScore: 0, avgPE: 0, avgROE: 0 };
+  const n = results.length;
+  const avgScore = results.reduce((s, x) => s + (x.compositeScore || 0), 0) / n;
+  const avgPE = results.reduce((s, x) => s + (x.financials?.pe || x.pe || 0), 0) / n;
+  const avgROE = results.reduce((s, x) => s + (x.financials?.roe || x.roe || 0), 0) / n;
+  return {
+    count: n,
+    avgScore: Math.round(avgScore * 10) / 10,
+    avgPE: Math.round(avgPE * 10) / 10,
+    avgROE: Math.round(avgROE * 10) / 10
+  };
+}
+
+// ─── Backend Backtest ─────────────────────────────────────────────────────────
+async function runBacktestFromBackend() {
+  const runBtn = document.getElementById('run-backtest-btn');
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.textContent = '回测运行中...';
+  }
+
+  try {
+    const filters = getFilters();
+    const params = {
+      weights: AppState.weights,
+      filters: filters,
+      sectors: filters.sectors || [],
+      frequency: AppState.backtestConfig.frequency,
+      top_n: AppState.backtestConfig.topN,
+      start_date: AppState.backtestConfig.startDate,
+      end_date: AppState.backtestConfig.endDate
+    };
+
+    const results = await ApiClient.runBacktest(params);
+    AppState.backtestResults = results;
+
+    // Show results section
+    document.getElementById('backtest-results').style.display = 'block';
+
+    // Render metrics
+    renderBacktestMetrics(results);
+
+    // Render equity curve
+    if (results.equity_curve) {
+      renderEquityCurve(results);
+    }
+
+    // Render monthly returns heatmap
+    if (results.monthly_returns) {
+      renderMonthlyHeatmap(results.monthly_returns);
+    }
+
+    // Render holdings
+    if (results.holdings_history) {
+      renderHoldingsHistory(results.holdings_history);
+    }
+
+  } catch (err) {
+    console.error('Backend backtest error:', err);
+    alert(`回测失败: ${err.message || '请先刷新数据'}`);
+  }
+
+  if (runBtn) {
+    runBtn.disabled = false;
+    runBtn.textContent = '运行回测';
+  }
+}
+
+function renderBacktestMetrics(results) {
+  const set = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  };
+
+  set('bt-annual-return', results.annual_return != null ? Fmt.pct(results.annual_return) : '--');
+  set('bt-max-drawdown', results.max_drawdown != null ? Fmt.pct(results.max_drawdown) : '--');
+  set('bt-sharpe', results.sharpe_ratio != null ? Fmt.num2(results.sharpe_ratio) : '--');
+  set('bt-win-rate', results.win_rate != null ? Fmt.pctNoSign(results.win_rate) : '--');
+  set('bt-alpha', results.alpha != null ? Fmt.pct(results.alpha) : '--');
+
+  // Color coding
+  const arEl = document.getElementById('bt-annual-return');
+  if (arEl && results.annual_return != null) {
+    arEl.className = `metric-value ${results.annual_return >= 0 ? 'val-up' : 'val-down'}`;
+  }
+  const alphaEl = document.getElementById('bt-alpha');
+  if (alphaEl && results.alpha != null) {
+    alphaEl.className = `metric-value ${results.alpha >= 0 ? 'val-up' : 'val-down'}`;
+  }
+}
+
+function renderEquityCurve(results) {
+  const canvas = document.getElementById('equity-chart');
+  if (!canvas) return;
+
+  // Destroy existing chart
+  if (canvas._chartInstance) canvas._chartInstance.destroy();
+
+  const dates = results.equity_curve.map(p => p.date);
+  const strategy = results.equity_curve.map(p => p.strategy);
+  const benchmark = results.equity_curve.map(p => p.benchmark);
+
+  const chart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: dates,
+      datasets: [
+        {
+          label: '策略净值',
+          data: strategy,
+          borderColor: '#3B82F6',
+          backgroundColor: 'rgba(59,130,246,0.08)',
+          fill: true,
+          borderWidth: 1.5,
+          pointRadius: 0,
+          tension: 0.1
+        },
+        {
+          label: '沪深300',
+          data: benchmark,
+          borderColor: '#94A3B8',
+          borderWidth: 1,
+          pointRadius: 0,
+          borderDash: [4, 2],
+          tension: 0.1
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'top', labels: { font: { size: 11 } } }
+      },
+      scales: {
+        x: {
+          ticks: { maxTicksLimit: 8, font: { size: 10 } },
+          grid: { display: false }
+        },
+        y: {
+          ticks: { font: { size: 10 } },
+          grid: { color: 'rgba(0,0,0,0.06)' }
+        }
+      }
+    }
+  });
+  canvas._chartInstance = chart;
+}
+
+function renderMonthlyHeatmap(monthlyReturns) {
+  const grid = document.getElementById('heatmap-grid');
+  if (!grid || !monthlyReturns.length) return;
+
+  grid.innerHTML = monthlyReturns.map(m => {
+    const val = m.return_pct;
+    const cls = val > 0 ? 'val-up' : val < 0 ? 'val-down' : '';
+    return `<div class="heatmap-cell ${cls}" title="${m.month}: ${Fmt.pct(val)}">
+      <span class="heatmap-month">${m.month}</span>
+      <span class="heatmap-val">${Fmt.pct(val)}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderHoldingsHistory(holdings) {
+  const tbody = document.getElementById('holdings-tbody');
+  if (!tbody) return;
+
+  const recent = holdings.slice(-10);
+  tbody.innerHTML = recent.map(h => `<tr>
+    <td>${h.date}</td>
+    <td>${(h.codes || []).join(', ')}</td>
+    <td>${(h.names || []).join(', ')}</td>
+    <td>${h.top_score != null ? Fmt.score(h.top_score) : '--'}</td>
+  </tr>`).join('');
+}
+
+// ─── Settings Controls ────────────────────────────────────────────────────────
+function initSettingsControls() {
+  // Test connection button
+  const testBtn = document.getElementById('test-connection-btn');
+  if (testBtn) {
+    testBtn.addEventListener('click', async () => {
+      const tokenInput = document.getElementById('tushare-token');
+      const token = tokenInput?.value?.trim();
+      if (!token) {
+        updateConnectionStatus('error', '请输入 Token');
+        return;
+      }
+
+      testBtn.disabled = true;
+      testBtn.textContent = '验证中...';
+      updateConnectionStatus('pending', '正在验证 Token...');
+
+      try {
+        const result = await ApiClient.setToken(token);
+        updateConnectionStatus('success', '✅ Token 验证成功，Tushare 已连接');
+        AppState.tushareConnected = true;
+        updateHeaderBadge();
+      } catch (err) {
+        updateConnectionStatus('error', `❌ ${err.message}`);
+      }
+
+      testBtn.disabled = false;
+      testBtn.textContent = '测试连接';
+    });
+  }
+
+  // Incremental refresh button
+  const incrBtn = document.getElementById('refresh-incremental-btn');
+  if (incrBtn) {
+    incrBtn.addEventListener('click', () => doRefreshData(false));
+  }
+
+  // Full refresh button
+  const fullBtn = document.getElementById('refresh-full-btn');
+  if (fullBtn) {
+    fullBtn.addEventListener('click', () => doRefreshData(true));
+  }
+
+  // Initial status check
+  refreshDataStatus();
+}
+
+function updateConnectionStatus(state, message) {
+  const el = document.getElementById('connection-status');
+  if (!el) return;
+  el.className = `connection-status ${state}`;
+  el.innerHTML = `<span>${message}</span>`;
+}
+
+async function doRefreshData(full) {
+  const statusEl = document.getElementById('refresh-status');
+  const incrBtn = document.getElementById('refresh-incremental-btn');
+  const fullBtn = document.getElementById('refresh-full-btn');
+
+  if (incrBtn) incrBtn.disabled = true;
+  if (fullBtn) fullBtn.disabled = true;
+
+  const label = full ? '全量刷新' : '增量更新';
+  if (statusEl) statusEl.textContent = `⏳ ${label}启动中...`;
+  if (statusEl) statusEl.style.color = 'var(--accent-blue, #3B82F6)';
+
+  try {
+    // Start the background refresh
+    const startResp = await ApiClient.refreshData(full);
+    if (statusEl) statusEl.textContent = `⏳ ${startResp.message || label + '已启动'}...`;
+
+    // Poll for progress
+    await pollRefreshStatus(statusEl, label);
+
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = `❌ ${label}失败: ${err.message}`;
+      statusEl.style.color = 'var(--market-down, #EF4444)';
+    }
+  }
+
+  if (incrBtn) incrBtn.disabled = false;
+  if (fullBtn) fullBtn.disabled = false;
+}
+
+async function pollRefreshStatus(statusEl, label) {
+  const POLL_INTERVAL = 3000; // 3 seconds
+  const MAX_POLLS = 2400;     // max ~2 hours
+
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await new Promise(r => setTimeout(r, POLL_INTERVAL));
+
+    try {
+      const s = await ApiClient.refreshStatus();
+
+      // Update progress bar text
+      if (statusEl) {
+        const elapsed = s.elapsed_seconds ? ` (${Math.round(s.elapsed_seconds)}秒)` : '';
+        const pctText = s.pct > 0 ? ` ${s.pct}%` : '';
+        statusEl.textContent = `⏳${pctText} ${s.progress || label + '中...'}${elapsed}`;
+        statusEl.style.color = 'var(--accent-blue, #3B82F6)';
+      }
+
+      // Update the mini progress bar if we add one
+      updateRefreshProgressBar(s.pct || 0);
+
+      // Check if done
+      if (!s.running) {
+        if (s.error) {
+          if (statusEl) {
+            statusEl.textContent = `❌ ${label}失败: ${s.error}`;
+            statusEl.style.color = 'var(--market-down, #EF4444)';
+          }
+          return;
+        }
+
+        // Success!
+        const elapsed = s.elapsed_seconds ? Math.round(s.elapsed_seconds) : '?';
+        if (statusEl) {
+          statusEl.textContent = `✅ ${label}完成！耗时 ${elapsed} 秒`;
+          statusEl.style.color = 'var(--market-up, #10B981)';
+        }
+        updateRefreshProgressBar(100);
+
+        // Refresh data status display
+        await refreshDataStatus();
+
+        // Update app state
+        const health = await ApiClient.health();
+        AppState.tushareConnected = health.tushare_connected;
+        AppState.cachedStocks = health.cached_stocks;
+        AppState.mode = health.cached_stocks > 0 ? 'backend' : AppState.mode;
+        updateHeaderBadge();
+        return;
+      }
+
+    } catch (pollErr) {
+      // Network hiccup during poll — just retry
+      console.log('Poll error (retrying):', pollErr.message);
+    }
+  }
+
+  // Exceeded max polls
+  if (statusEl) {
+    statusEl.textContent = `⚠️ ${label}仍在后台运行，请稍后查看数据状态`;
+    statusEl.style.color = 'var(--text-muted)';
+  }
+}
+
+function updateRefreshProgressBar(pct) {
+  let bar = document.getElementById('refresh-progress-bar');
+  if (!bar) {
+    // Create progress bar on first call
+    const container = document.getElementById('refresh-status');
+    if (!container || !container.parentNode) return;
+    bar = document.createElement('div');
+    bar.id = 'refresh-progress-bar';
+    bar.style.cssText = 'width:100%;height:4px;background:var(--bg-input,#1e1e2e);border-radius:2px;margin-top:8px;overflow:hidden;';
+    bar.innerHTML = '<div id="refresh-progress-fill" style="height:100%;width:0%;background:var(--accent-blue,#3B82F6);border-radius:2px;transition:width 0.5s ease;"></div>';
+    container.parentNode.insertBefore(bar, container.nextSibling);
+  }
+  const fill = document.getElementById('refresh-progress-fill');
+  if (fill) fill.style.width = `${pct}%`;
+  // Hide bar when complete
+  if (pct >= 100) {
+    setTimeout(() => { if (bar) bar.style.opacity = '0.3'; }, 2000);
+  } else {
+    bar.style.opacity = '1';
+  }
+}
+
+async function refreshDataStatus() {
+  try {
+    const status = await ApiClient.getDataStatus();
+
+    const set = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = val;
+    };
+
+    set('ds-stock-count', status.stock_count || 0);
+    set('ds-last-price', status.last_price_date || '--');
+    set('ds-cache-age', status.cache_age_hours != null ? `${status.cache_age_hours.toFixed(1)}h` : '--');
+
+    let stateText = '--';
+    if (status.has_prices && status.has_financials) stateText = '完整';
+    else if (status.has_prices) stateText = '仅行情';
+    else if (status.stock_count > 0) stateText = '仅列表';
+    set('ds-data-state', stateText);
+
+    // Update connection status display
+    const health = await ApiClient.health();
+    if (health.tushare_connected) {
+      updateConnectionStatus('success', `✅ Tushare 已连接 · ${health.cached_stocks} 只股票`);
+    } else {
+      updateConnectionStatus('demo', '● 未连接 Tushare');
+    }
+
+    // If we have token already set via env var, show in preview
+    const tokenStatus = await ApiClient.getTokenStatus();
+    if (tokenStatus.token_preview) {
+      const tokenInput = document.getElementById('tushare-token');
+      if (tokenInput && !tokenInput.value) {
+        tokenInput.placeholder = `已配置: ${tokenStatus.token_preview}`;
+      }
+    }
+
+  } catch (err) {
+    console.log('Could not fetch data status:', err.message);
+  }
+}
+
+// ─── Show messages ────────────────────────────────────────────────────────────
+function showBackendModeMessage() {
+  const container = document.getElementById('results-tbody');
+  if (container) {
+    container.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:3rem;color:var(--text-secondary,#888);">
+      <div style="font-size:1.25rem;margin-bottom:0.5rem;">后端已连接 ✓</div>
+      <div>请在「Tushare 配置」面板中点击「全量刷新数据」拉取 A 股数据后开始选股</div>
+    </td></tr>`;
+  }
+}
+
+function showNoDataMessage() {
+  const container = document.getElementById('results-tbody');
+  if (container) {
+    container.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:3rem;color:var(--text-secondary,#888);">
+      <div style="font-size:1.25rem;margin-bottom:0.5rem;">暂无数据</div>
+      <div>请确保后端服务正常运行，并设置 Tushare Token</div>
+    </td></tr>`;
   }
 }
 
 // ─── Sector Filter Chips ──────────────────────────────────────────────────────
 function initSectorFilters(stocks) {
-  const sectors = [...new Set(stocks.map(s => s.sector))].sort();
+  const sectors = [...new Set(stocks.map(s => s.sector).filter(Boolean))].sort();
   const container = document.getElementById('sector-chips');
   if (!container) return;
+
+  if (sectors.length === 0) {
+    container.innerHTML = '<div style="color:var(--text-muted);font-size:12px">刷新数据后显示行业列表</div>';
+    return;
+  }
 
   container.innerHTML = sectors.map(sector => `
     <label class="sector-chip selected" data-sector="${sector}">
@@ -191,17 +722,17 @@ function getSelectedSectors() {
 // ─── Date Pickers Init ────────────────────────────────────────────────────────
 function initDatePickers(stocks) {
   if (!stocks || stocks.length === 0) return;
+  if (!stocks[0].prices || stocks[0].prices.length === 0) return;
+
   const dates = stocks[0].prices.map(p => p.date);
   const minDate = dates[0];
   const maxDate = dates[dates.length - 1];
 
-  // Backtest dates
   const startInput = document.getElementById('bt-start-date');
   const endInput = document.getElementById('bt-end-date');
   if (startInput) {
     startInput.min = minDate;
     startInput.max = maxDate;
-    // Default: 2 years back from end
     const defaultStart = dates[Math.max(0, dates.length - 500)];
     startInput.value = defaultStart;
     AppState.backtestConfig.startDate = defaultStart;
@@ -273,7 +804,13 @@ function initFilterControls() {
   // Run button
   const runBtn = document.getElementById('run-btn');
   if (runBtn) {
-    runBtn.addEventListener('click', runScreener);
+    runBtn.addEventListener('click', () => {
+      if (AppState.mode === 'backend') {
+        runScreenerFromBackend();
+      } else {
+        runScreener();
+      }
+    });
   }
 }
 
@@ -286,7 +823,8 @@ function resetFilters() {
   // Reset sector chips
   document.querySelectorAll('#sector-chips .sector-chip').forEach(chip => {
     chip.classList.add('selected');
-    chip.querySelector('input').checked = true;
+    const input = chip.querySelector('input');
+    if (input) input.checked = true;
   });
 
   // Reset weights
@@ -297,7 +835,11 @@ function resetFilters() {
   });
   updateWeightDisplay();
 
-  runScreener();
+  if (AppState.mode === 'backend') {
+    runScreenerFromBackend();
+  } else {
+    runScreener();
+  }
 }
 
 function getFilters() {
@@ -329,7 +871,7 @@ function getFilters() {
   };
 }
 
-// ─── Run Screener ─────────────────────────────────────────────────────────────
+// ─── Run Screener (Demo Mode) ─────────────────────────────────────────────────
 function runScreener() {
   if (!AppState.data) return;
 
@@ -339,7 +881,6 @@ function runScreener() {
     runBtn.textContent = '计算中...';
   }
 
-  // Use setTimeout to let UI update before heavy computation
   setTimeout(() => {
     const filters = getFilters();
     AppState.filters = filters;
@@ -358,14 +899,12 @@ function runScreener() {
 
 // ─── Render Screener Results ──────────────────────────────────────────────────
 function renderScreenerResults(results) {
-  renderKPICards(results);
+  renderKPICardsFromResults(results);
   renderResultsTable(results);
   renderBottomCharts(results);
 }
 
-function renderKPICards(results) {
-  const stats = Screener.computeStats(results);
-
+function renderKPICards(stats) {
   const setKPI = (id, val) => {
     const el = document.getElementById(id);
     if (el) el.textContent = val;
@@ -377,6 +916,16 @@ function renderKPICards(results) {
   setKPI('kpi-avg-roe', `${Fmt.num1(stats.avgROE)}%`);
 }
 
+function renderKPICardsFromResults(results) {
+  let stats;
+  if (typeof Screener !== 'undefined' && Screener.computeStats) {
+    stats = Screener.computeStats(results);
+  } else {
+    stats = computeStatsFromResults(results);
+  }
+  renderKPICards(stats);
+}
+
 function renderResultsTable(results) {
   const countEl = document.getElementById('table-count');
   if (countEl) countEl.textContent = `共 ${results.length} 只`;
@@ -385,7 +934,7 @@ function renderResultsTable(results) {
   if (!tbody) return;
 
   if (results.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;padding:40px;color:var(--text-muted)">
+    tbody.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:40px;color:var(--text-muted)">
       没有符合条件的股票，请调整筛选条件
     </td></tr>`;
     return;
@@ -395,23 +944,29 @@ function renderResultsTable(results) {
   const sorted = sortResults([...results]);
 
   tbody.innerHTML = sorted.map((s, i) => {
-    const f = s.financials;
-    const t = s.technicals;
+    const f = s.financials || {};
+    const t = s.technicals || {};
     const rankClass = i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : 'rank-other';
-    const sc = s.compositeScore;
+    const sc = s.compositeScore || 0;
 
-    // Price change (compare last two prices)
-    const prices = s.prices;
-    const lastPrice = prices[prices.length - 1];
-    const prevPrice = prices[prices.length - 2];
-    const priceChange = prevPrice ? (lastPrice.close - prevPrice.close) / prevPrice.close * 100 : 0;
+    // Price change
+    let priceChange = 0;
+    let lastPrice = t.price || 0;
+    if (s.prices && s.prices.length >= 2) {
+      const lp = s.prices[s.prices.length - 1];
+      const pp = s.prices[s.prices.length - 2];
+      lastPrice = lp.close;
+      priceChange = pp ? (lp.close - pp.close) / pp.close * 100 : 0;
+    } else if (s.pct_chg != null) {
+      priceChange = s.pct_chg;
+    }
     const priceClass = priceChange > 0 ? 'val-up' : priceChange < 0 ? 'val-down' : 'val-neutral';
 
     return `<tr data-code="${s.code}" onclick="selectStock('${s.code}')">
       <td><span class="rank-badge ${rankClass}">${i + 1}</span></td>
-      <td><span class="stock-code">${s.code}</span></td>
-      <td><span class="stock-name">${s.name}</span></td>
-      <td><span class="industry-tag">${s.industry}</span></td>
+      <td><span class="stock-code">${s.code || '--'}</span></td>
+      <td><span class="stock-name">${s.name || '--'}</span></td>
+      <td><span class="industry-tag">${s.industry || s.sector || '--'}</span></td>
       <td>
         <div class="score-bar-cell">
           <div class="score-bar-track">
@@ -420,11 +975,11 @@ function renderResultsTable(results) {
           <span class="score-val" style="color:${scoreColor(sc)}">${Fmt.score(sc)}</span>
         </div>
       </td>
-      <td style="color:${scoreColor(s.valueScore)}">${Fmt.score(s.valueScore)}</td>
-      <td style="color:${scoreColor(s.growthScore)}">${Fmt.score(s.growthScore)}</td>
-      <td style="color:${scoreColor(s.qualityScore)}">${Fmt.score(s.qualityScore)}</td>
-      <td style="color:${scoreColor(s.momentumScore)}">${Fmt.score(s.momentumScore)}</td>
-      <td class="${priceClass}">¥${Fmt.price(t.price || lastPrice?.close)}</td>
+      <td style="color:${scoreColor(s.valueScore || 0)}">${Fmt.score(s.valueScore)}</td>
+      <td style="color:${scoreColor(s.growthScore || 0)}">${Fmt.score(s.growthScore)}</td>
+      <td style="color:${scoreColor(s.qualityScore || 0)}">${Fmt.score(s.qualityScore)}</td>
+      <td style="color:${scoreColor(s.momentumScore || 0)}">${Fmt.score(s.momentumScore)}</td>
+      <td class="${priceClass}">¥${Fmt.price(lastPrice || f.price || t.price)}</td>
       <td>${Fmt.num1(f.pe)}</td>
       <td>${Fmt.num2(f.pb)}</td>
       <td>${Fmt.num1(f.roe)}%</td>
@@ -450,14 +1005,14 @@ function sortResults(results) {
       case 'growthScore': va = a.growthScore; vb = b.growthScore; break;
       case 'qualityScore': va = a.qualityScore; vb = b.qualityScore; break;
       case 'momentumScore': va = a.momentumScore; vb = b.momentumScore; break;
-      case 'pe': va = a.financials.pe; vb = b.financials.pe; break;
-      case 'pb': va = a.financials.pb; vb = b.financials.pb; break;
-      case 'roe': va = a.financials.roe; vb = b.financials.roe; break;
-      case 'revGrowth': va = a.financials.revenue_growth_yoy; vb = b.financials.revenue_growth_yoy; break;
-      case 'mom20': va = a.technicals.momentum_20d; vb = b.technicals.momentum_20d; break;
+      case 'pe': va = a.financials?.pe; vb = b.financials?.pe; break;
+      case 'pb': va = a.financials?.pb; vb = b.financials?.pb; break;
+      case 'roe': va = a.financials?.roe; vb = b.financials?.roe; break;
+      case 'revGrowth': va = a.financials?.revenue_growth_yoy; vb = b.financials?.revenue_growth_yoy; break;
+      case 'mom20': va = a.technicals?.momentum_20d; vb = b.technicals?.momentum_20d; break;
       case 'price': {
-        va = a.technicals.price || a.prices[a.prices.length - 1]?.close || 0;
-        vb = b.technicals.price || b.prices[b.prices.length - 1]?.close || 0;
+        va = a.technicals?.price || a.prices?.[a.prices?.length - 1]?.close || 0;
+        vb = b.technicals?.price || b.prices?.[b.prices?.length - 1]?.close || 0;
         break;
       }
       default: va = a.compositeScore; vb = b.compositeScore;
@@ -494,17 +1049,41 @@ function updateSortIndicators() {
 
 // ─── Bottom Charts ────────────────────────────────────────────────────────────
 function renderBottomCharts(results) {
-  const sectorDist = Screener.getSectorDistribution(results);
-  Charts.renderSectorChart('sector-chart', sectorDist);
+  if (typeof Screener !== 'undefined') {
+    const sectorDist = Screener.getSectorDistribution(results);
+    Charts.renderSectorChart('sector-chart', sectorDist);
 
-  const histogram = Screener.getScoreHistogram(results, 10);
-  Charts.renderScoreHistogram('score-histogram', histogram);
+    const histogram = Screener.getScoreHistogram(results, 10);
+    Charts.renderScoreHistogram('score-histogram', histogram);
+  } else {
+    // Compute stats locally for backend results
+    const sectorDist = {};
+    for (const s of results) {
+      const sec = s.sector || s.industry || '未知';
+      sectorDist[sec] = (sectorDist[sec] || 0) + 1;
+    }
+    const sectorArr = Object.entries(sectorDist).map(([sector, count]) => ({ sector, count })).sort((a, b) => b.count - a.count);
+    Charts.renderSectorChart('sector-chart', sectorArr);
+
+    const bins = 10;
+    const binSize = 100 / bins;
+    const hist = Array(bins).fill(0);
+    for (const s of results) {
+      const bin = Math.min(Math.floor((s.compositeScore || 0) / binSize), bins - 1);
+      hist[bin]++;
+    }
+    const histArr = hist.map((count, i) => ({
+      label: `${Math.round(i * binSize)}-${Math.round((i + 1) * binSize)}`,
+      count
+    }));
+    Charts.renderScoreHistogram('score-histogram', histArr);
+  }
 }
 
 // ─── Stock Selection ──────────────────────────────────────────────────────────
 function selectStock(code) {
   const stock = AppState.screenerResults.find(s => s.code === code) ||
-    AppState.data?.stocks.find(s => s.code === code);
+    AppState.data?.stocks?.find(s => s.code === code);
   if (!stock) return;
 
   AppState.selectedStock = stock;
@@ -523,13 +1102,16 @@ function renderStockAnalysis(stock) {
   const container = document.getElementById('analysis-content');
   if (!container) return;
 
-  const f = stock.financials;
-  const t = stock.technicals;
-  const prices = stock.prices;
-  const lastPrice = prices[prices.length - 1];
-  const prevPrice = prices[prices.length - 2];
-  const priceChange = prevPrice ? (lastPrice.close - prevPrice.close) / prevPrice.close * 100 : 0;
-  const priceAbs = lastPrice.close - (prevPrice?.close || lastPrice.close);
+  const f = stock.financials || {};
+  const t = stock.technicals || {};
+  const prices = stock.prices || [];
+
+  // If no prices, show basic info
+  const hasPrice = prices.length > 0;
+  const lastPrice = hasPrice ? prices[prices.length - 1] : null;
+  const prevPrice = hasPrice && prices.length >= 2 ? prices[prices.length - 2] : null;
+  const priceChange = prevPrice ? (lastPrice.close - prevPrice.close) / prevPrice.close * 100 : (stock.pct_chg || 0);
+  const priceAbs = prevPrice ? lastPrice.close - prevPrice.close : 0;
   const changeClass = priceChange > 0 ? 'up' : priceChange < 0 ? 'down' : '';
   const changeSign = priceChange > 0 ? '+' : '';
 
@@ -537,10 +1119,10 @@ function renderStockAnalysis(stock) {
   document.getElementById('no-stock-msg').style.display = 'none';
 
   // Render HTML
-  document.getElementById('analysis-stock-name').textContent = stock.name;
-  document.getElementById('analysis-stock-code').textContent = stock.code;
-  document.getElementById('analysis-stock-sector').textContent = `${stock.sector} · ${stock.industry}`;
-  document.getElementById('analysis-price').textContent = `¥${Fmt.price(lastPrice.close)}`;
+  document.getElementById('analysis-stock-name').textContent = stock.name || '--';
+  document.getElementById('analysis-stock-code').textContent = stock.code || '--';
+  document.getElementById('analysis-stock-sector').textContent = `${stock.sector || '--'} · ${stock.industry || '--'}`;
+  document.getElementById('analysis-price').textContent = `¥${Fmt.price(lastPrice?.close || t.price || 0)}`;
   document.getElementById('analysis-change').textContent = `${changeSign}${Fmt.price(priceAbs)} (${changeSign}${Fmt.pctNoSign(priceChange)})`;
   document.getElementById('analysis-change').className = `stock-change ${changeClass}`;
 
@@ -566,459 +1148,207 @@ function renderStockAnalysis(stock) {
   if (finGrid) {
     finGrid.innerHTML = finData.map(([label, val]) => `
       <div class="fin-item">
-        <div class="fin-label">${label}</div>
-        <div class="fin-value">${val}</div>
+        <span class="fin-label">${label}</span>
+        <span class="fin-value">${val}</span>
       </div>
     `).join('');
   }
 
-  // Technical indicators
-  const techItems = [
-    ['MA5', `¥${Fmt.price(t.ma5)}`],
-    ['MA20', `¥${Fmt.price(t.ma20)}`],
-    ['MA60', `¥${Fmt.price(t.ma60)}`],
-    ['MA120', `¥${Fmt.price(t.ma120)}`],
+  // Score card
+  document.getElementById('stock-composite-score').textContent = Fmt.score(stock.compositeScore);
+  document.getElementById('stock-composite-score').style.color = scoreColor(stock.compositeScore);
+
+  const scoreItems = ['value', 'growth', 'quality', 'momentum'];
+  scoreItems.forEach(key => {
+    const score = stock[`${key}Score`] || 0;
+    const bar = document.getElementById(`stock-score-bar-${key}`);
+    const val = document.getElementById(`stock-score-${key}`);
+    if (bar) bar.style.width = `${score}%`;
+    if (val) val.textContent = Fmt.score(score);
+  });
+
+  // RSI
+  const rsi = t.rsi_14 || 50;
+  document.getElementById('rsi-value').textContent = Fmt.num1(rsi);
+  const rsiLabel = rsi > 70 ? '超买' : rsi < 30 ? '超卖' : '中性';
+  document.getElementById('rsi-label').textContent = rsiLabel;
+  document.getElementById('rsi-thumb').style.left = `${rsi}%`;
+
+  // Technical grid
+  const techData = [
     ['20日动量', Fmt.pct(t.momentum_20d)],
     ['60日动量', Fmt.pct(t.momentum_60d)],
-    ['成交量比', Fmt.num2(t.volume_ratio)],
-    ['布林带位置', Fmt.pctNoSign(t.bb_position * 100)]
+    ['成交量比', Fmt.num2(t.volume_ratio || 1) + 'x'],
+    ['MA5', t.ma5 ? `¥${Fmt.price(t.ma5)}` : '--'],
+    ['MA20', t.ma20 ? `¥${Fmt.price(t.ma20)}` : '--'],
+    ['MA60', t.ma60 ? `¥${Fmt.price(t.ma60)}` : '--']
   ];
 
   const techGrid = document.getElementById('tech-grid');
   if (techGrid) {
-    techGrid.innerHTML = techItems.map(([label, val]) => `
+    techGrid.innerHTML = techData.map(([label, val]) => `
       <div class="fin-item">
-        <div class="fin-label">${label}</div>
-        <div class="fin-value">${val}</div>
+        <span class="fin-label">${label}</span>
+        <span class="fin-value">${val}</span>
       </div>
     `).join('');
   }
 
-  // RSI gauge
-  const rsiVal = t.rsi_14 || 50;
-  const rsiEl = document.getElementById('rsi-value');
-  const rsiThumb = document.getElementById('rsi-thumb');
-  if (rsiEl) {
-    rsiEl.textContent = rsiVal.toFixed(1);
-    rsiEl.style.color = rsiVal > 70 ? 'var(--market-up)' : rsiVal < 30 ? 'var(--market-down)' : 'var(--accent-blue)';
-  }
-  if (rsiThumb) {
-    rsiThumb.style.left = `${rsiVal}%`;
-  }
-
-  const rsiLabel = document.getElementById('rsi-label');
-  if (rsiLabel) {
-    rsiLabel.textContent = rsiVal > 70 ? '超买区域' : rsiVal < 30 ? '超卖区域' : rsiVal > 50 ? '强势区间' : '弱势区间';
+  // Price chart
+  if (hasPrice && typeof Charts !== 'undefined') {
+    Charts.renderPriceChart('price-chart', prices);
+    Charts.renderVolumeChart('volume-chart', prices);
+    Charts.renderMACDChart('macd-chart', prices);
+    Charts.renderRSIChart('rsi-chart', prices);
   }
 
   // MA signals
-  const maSignals = [];
-  if (t.above_ma20) maSignals.push({ txt: '站上MA20', good: true });
-  else maSignals.push({ txt: '跌破MA20', good: false });
-  if (t.above_ma60) maSignals.push({ txt: '站上MA60', good: true });
-  else maSignals.push({ txt: '跌破MA60', good: false });
-  if (t.golden_cross_ma) maSignals.push({ txt: '金叉信号', good: true });
-
   const signalsEl = document.getElementById('ma-signals');
-  if (signalsEl) {
-    signalsEl.innerHTML = maSignals.map(s => `
-      <span class="signal-badge ${s.good ? 'signal-good' : 'signal-bad'}">${s.txt}</span>
-    `).join('');
+  if (signalsEl && hasPrice) {
+    const signals = [];
+    const close = lastPrice.close;
+    if (t.ma5 && close > t.ma5) signals.push({ text: '站上MA5', good: true });
+    if (t.ma20 && close > t.ma20) signals.push({ text: '站上MA20', good: true });
+    if (t.ma60 && close > t.ma60) signals.push({ text: '站上MA60', good: true });
+    if (t.ma5 && close < t.ma5) signals.push({ text: '跌破MA5', good: false });
+    if (t.ma20 && close < t.ma20) signals.push({ text: '跌破MA20', good: false });
+    if (t.ma60 && close < t.ma60) signals.push({ text: '跌破MA60', good: false });
+    if (rsi > 70) signals.push({ text: 'RSI超买', good: false });
+    if (rsi < 30) signals.push({ text: 'RSI超卖', good: true });
+
+    signalsEl.innerHTML = signals.map(s =>
+      `<span class="signal-badge ${s.good ? 'signal-good' : 'signal-bad'}">${s.text}</span>`
+    ).join('');
   }
 
-  // Scores (if available)
-  if (stock.compositeScore != null) {
-    const scoreEl = document.getElementById('stock-composite-score');
-    if (scoreEl) scoreEl.textContent = Fmt.score(stock.compositeScore);
-
-    ['value', 'growth', 'quality', 'momentum'].forEach(f => {
-      const el = document.getElementById(`stock-score-${f}`);
-      const bar = document.getElementById(`stock-score-bar-${f}`);
-      const sc = stock[`${f}Score`];
-      if (el) {
-        el.textContent = Fmt.score(sc);
-        el.style.color = scoreColor(sc);
-      }
-      if (bar) {
-        bar.style.width = `${sc || 0}%`;
-        bar.style.background = scoreColor(sc);
-      }
-    });
+  // Quarterly chart (if data available)
+  if (stock.quarterly && typeof Charts !== 'undefined') {
+    Charts.renderQuarterlyChart('quarterly-chart', stock.quarterly);
   }
-
-  // Render charts
-  setTimeout(() => {
-    Charts.renderPriceChart('price-chart', prices, t);
-    Charts.renderVolumeChart('volume-chart', prices);
-    if (f.quarters && f.quarters.length > 0) {
-      Charts.renderQuarterlyChart('quarterly-chart', f.quarters);
-    }
-    Charts.renderRSIChart('rsi-chart', prices);
-    Charts.renderMACDChart('macd-chart', prices);
-  }, 50);
 }
 
 // ─── Backtest Controls ────────────────────────────────────────────────────────
 function initBacktestControls() {
   // Frequency toggle
-  document.querySelectorAll('#bt-frequency .toggle-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('#bt-frequency .toggle-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      AppState.backtestConfig.frequency = btn.dataset.value;
+  const freqGroup = document.getElementById('bt-frequency');
+  if (freqGroup) {
+    freqGroup.querySelectorAll('.toggle-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        freqGroup.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        AppState.backtestConfig.frequency = btn.dataset.value;
+      });
     });
-  });
+  }
 
-  // TopN toggle
-  document.querySelectorAll('#bt-topn .toggle-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('#bt-topn .toggle-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      AppState.backtestConfig.topN = parseInt(btn.dataset.value);
+  // Top N toggle
+  const topnGroup = document.getElementById('bt-topn');
+  if (topnGroup) {
+    topnGroup.querySelectorAll('.toggle-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        topnGroup.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        AppState.backtestConfig.topN = parseInt(btn.dataset.value);
+      });
     });
-  });
+  }
 
-  // Date pickers
+  // Date inputs
   const startInput = document.getElementById('bt-start-date');
   const endInput = document.getElementById('bt-end-date');
-  if (startInput) startInput.addEventListener('change', () => { AppState.backtestConfig.startDate = startInput.value; });
-  if (endInput) endInput.addEventListener('change', () => { AppState.backtestConfig.endDate = endInput.value; });
+  if (startInput) {
+    startInput.addEventListener('change', () => {
+      AppState.backtestConfig.startDate = startInput.value;
+    });
+  }
+  if (endInput) {
+    endInput.addEventListener('change', () => {
+      AppState.backtestConfig.endDate = endInput.value;
+    });
+  }
 
-  // Run button
+  // Run backtest button
   const runBtBtn = document.getElementById('run-backtest-btn');
   if (runBtBtn) {
-    runBtBtn.addEventListener('click', runBacktest);
+    runBtBtn.addEventListener('click', () => {
+      if (AppState.mode === 'backend') {
+        runBacktestFromBackend();
+      } else if (AppState.mode === 'demo' && AppState.data) {
+        runBacktestLocal();
+      } else {
+        alert('请先加载数据');
+      }
+    });
   }
 }
 
-function runBacktest() {
-  if (!AppState.data) return;
+function runBacktestLocal() {
+  if (!AppState.data || typeof Backtest === 'undefined') return;
 
-  const btn = document.getElementById('run-backtest-btn');
-  if (btn) { btn.disabled = true; btn.textContent = '计算中...'; }
-
-  const resultArea = document.getElementById('backtest-results');
-  if (resultArea) resultArea.style.display = 'none';
+  const runBtn = document.getElementById('run-backtest-btn');
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.textContent = '回测运行中...';
+  }
 
   setTimeout(() => {
-    const config = {
-      ...AppState.backtestConfig,
-      weights: AppState.weights
-    };
-
-    if (!config.startDate || !config.endDate) {
-      alert('请选择回测起止日期');
-      if (btn) { btn.disabled = false; btn.textContent = '运行回测'; }
-      return;
-    }
-
+    const config = AppState.backtestConfig;
     const results = Backtest.run(
       AppState.data.stocks,
       AppState.data.benchmark,
-      config
+      AppState.weights,
+      config.frequency,
+      config.topN,
+      config.startDate,
+      config.endDate
     );
-
-    if (results.error) {
-      alert(results.error);
-      if (btn) { btn.disabled = false; btn.textContent = '运行回测'; }
-      return;
-    }
 
     AppState.backtestResults = results;
-    renderBacktestResults(results);
+    document.getElementById('backtest-results').style.display = 'block';
 
-    if (resultArea) resultArea.style.display = 'block';
-    if (btn) { btn.disabled = false; btn.textContent = '运行回测'; }
+    // Render local results
+    Backtest.renderResults(results);
+
+    if (runBtn) {
+      runBtn.disabled = false;
+      runBtn.textContent = '运行回测';
+    }
   }, 50);
 }
 
-function renderBacktestResults(results) {
-  const { metrics, equityCurve, holdingsHistory, monthlyReturns } = results;
-
-  // Metrics
-  const m = metrics;
-  const setMetric = (id, val, colorize = true) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.textContent = val;
-    if (colorize) {
-      const num = parseFloat(val);
-      el.style.color = num > 0 ? 'var(--market-up)' : num < 0 ? 'var(--market-down)' : 'var(--text-primary)';
-    }
-  };
-
-  setMetric('bt-annual-return', `${m.annualizedReturn > 0 ? '+' : ''}${m.annualizedReturn.toFixed(2)}%`);
-  setMetric('bt-max-drawdown', `-${m.maxDrawdown.toFixed(2)}%`, false);
-  document.getElementById('bt-max-drawdown').style.color = 'var(--market-down)';
-  setMetric('bt-sharpe', m.sharpeRatio.toFixed(2), false);
-  document.getElementById('bt-sharpe').style.color = m.sharpeRatio > 1 ? 'var(--market-up)' : m.sharpeRatio > 0.5 ? 'var(--text-secondary)' : 'var(--market-down)';
-  setMetric('bt-win-rate', `${m.winRate.toFixed(1)}%`, false);
-  document.getElementById('bt-win-rate').style.color = m.winRate > 50 ? 'var(--market-up)' : 'var(--market-down)';
-  setMetric('bt-alpha', `${m.alpha > 0 ? '+' : ''}${m.alpha.toFixed(2)}%`);
-
-  // Equity chart
-  setTimeout(() => {
-    Charts.renderEquityChart('equity-chart', equityCurve);
-  }, 50);
-
-  // Monthly heatmap
-  renderMonthlyHeatmap(monthlyReturns);
-
-  // Holdings table
-  renderHoldingsTable(holdingsHistory);
-}
-
-function renderMonthlyHeatmap(monthlyReturns) {
-  const container = document.getElementById('heatmap-grid');
-  if (!container) return;
-
-  const years = Object.keys(monthlyReturns).sort();
-  const months = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
-
-  let html = `<div class="heatmap-header"></div>`;
-  months.forEach(m => { html += `<div class="heatmap-header">${m}</div>`; });
-
-  years.forEach(year => {
-    html += `<div class="heatmap-year">${year}</div>`;
-    for (let mo = 1; mo <= 12; mo++) {
-      const ret = monthlyReturns[year]?.[mo];
-      if (ret == null) {
-        html += `<div class="heatmap-cell zero">—</div>`;
-      } else {
-        const pct = (ret * 100).toFixed(1);
-        const isPos = ret > 0;
-        const isStrong = Math.abs(ret) > 0.03;
-        const cls = isPos ? `positive${isStrong ? ' strong' : ''}` : `negative${isStrong ? ' strong' : ''}`;
-        html += `<div class="heatmap-cell ${cls}">${isPos ? '+' : ''}${pct}%</div>`;
-      }
-    }
-  });
-
-  container.innerHTML = html;
-}
-
-function renderHoldingsTable(holdingsHistory) {
-  const tbody = document.getElementById('holdings-tbody');
-  if (!tbody || !holdingsHistory.length) return;
-
-  // Show last 6 periods
-  const recent = holdingsHistory.slice(-6).reverse();
-
-  tbody.innerHTML = recent.map(period => `
-    <tr>
-      <td>${period.date}</td>
-      <td>${period.stocks.map(s => `<span class="stock-code" style="margin-right:4px">${s.code}</span>`).join('')}</td>
-      <td>${period.stocks.map(s => s.name).join('、')}</td>
-      <td>${period.stocks[0] ? Fmt.score(period.stocks[0].score) : '--'}</td>
-    </tr>
-  `).join('');
-}
-
-// ─── Data Mode Detection ─────────────────────────────────────────────────────
-AppState.dataMode = 'demo';  // 'demo' or 'live'
-AppState.backendAvailable = false;
-
-async function checkBackend() {
-  try {
-    if (typeof ApiClient !== 'undefined') {
-      const available = await ApiClient.isAvailable();
-      AppState.backendAvailable = available;
-      return available;
-    }
-  } catch { }
-  return false;
-}
-
-// ─── Settings Tab ─────────────────────────────────────────────────────────────
-function initSettings() {
-  // Test Connection Button
-  const testBtn = document.getElementById('test-connection-btn');
-  if (testBtn) {
-    testBtn.addEventListener('click', async () => {
-      const token = document.getElementById('tushare-token').value.trim();
-      const statusEl = document.getElementById('connection-status');
-
-      if (!token) {
-        if (statusEl) {
-          statusEl.className = 'connection-status error';
-          statusEl.innerHTML = '<span>● 请输入 Token</span>';
-        }
-        return;
-      }
-
-      if (statusEl) {
-        statusEl.className = 'connection-status demo';
-        statusEl.innerHTML = '<span class="refresh-progress">● 验证中...</span>';
-      }
-
-      if (!AppState.backendAvailable) {
-        if (statusEl) {
-          statusEl.className = 'connection-status error';
-          statusEl.innerHTML = '<span>● 后端服务未启动。请先启动 API 服务器。</span>';
-        }
-        return;
-      }
-
-      try {
-        const result = await ApiClient.setToken(token);
-        if (statusEl) {
-          statusEl.className = 'connection-status connected';
-          statusEl.innerHTML = `<span>● ${result.message || 'Token 验证成功'}</span>`;
-        }
-        AppState.dataMode = 'live';
-        updateDataStatusUI();
-      } catch (err) {
-        if (statusEl) {
-          statusEl.className = 'connection-status error';
-          statusEl.innerHTML = `<span>● ${err.message}</span>`;
-        }
-      }
-    });
-  }
-
-  // Data Refresh Buttons
-  const incrBtn = document.getElementById('refresh-incremental-btn');
-  const fullBtn = document.getElementById('refresh-full-btn');
-
-  if (incrBtn) {
-    incrBtn.addEventListener('click', () => doRefreshData(false));
-  }
-  if (fullBtn) {
-    fullBtn.addEventListener('click', () => doRefreshData(true));
-  }
-
-  // Check backend on init
-  checkBackend().then(available => {
-    if (available) {
-      updateDataStatusUI();
-      // Auto-check token status
-      ApiClient.getTokenStatus().then(status => {
-        const statusEl = document.getElementById('connection-status');
-        if (status.has_token && status.connected) {
-          AppState.dataMode = 'live';
-          if (statusEl) {
-            statusEl.className = 'connection-status connected';
-            statusEl.innerHTML = `<span>● 已连接 (${status.token_preview || 'Tushare Pro'})</span>`;
-          }
-          if (status.token_preview) {
-            const tokenInput = document.getElementById('tushare-token');
-            if (tokenInput) tokenInput.placeholder = `已保存: ${status.token_preview}`;
-          }
-        }
-      }).catch(() => {});
-    }
-  });
-}
-
-async function doRefreshData(full) {
-  if (!AppState.backendAvailable) {
-    alert('后端服务未启动。请先运行 API 服务器。');
-    return;
-  }
-
-  const statusEl = document.getElementById('refresh-status');
-  const incrBtn = document.getElementById('refresh-incremental-btn');
-  const fullBtn = document.getElementById('refresh-full-btn');
-
-  // Disable buttons
-  if (incrBtn) incrBtn.disabled = true;
-  if (fullBtn) fullBtn.disabled = true;
-
-  const label = full ? '全量刷新' : '增量更新';
-  if (statusEl) {
-    statusEl.className = 'refresh-progress';
-    statusEl.textContent = `⏳ 正在${label}数据，请稍候...`;
-  }
-
-  try {
-    const result = await ApiClient.refreshData(full);
-    if (statusEl) {
-      statusEl.className = '';
-      statusEl.style.color = '#10B981';
-      statusEl.textContent = `✅ ${label}完成（耗时 ${result.elapsed_seconds}s）`;
-    }
-    updateDataStatusUI();
-
-    // Reload data if live mode
-    if (AppState.dataMode === 'live') {
-      await loadLiveData();
-    }
-  } catch (err) {
-    if (statusEl) {
-      statusEl.className = '';
-      statusEl.style.color = '#EF4444';
-      statusEl.textContent = `❌ ${label}失败: ${err.message}`;
-    }
-  } finally {
-    if (incrBtn) incrBtn.disabled = false;
-    if (fullBtn) fullBtn.disabled = false;
+// ─── Remove Loading Overlay ───────────────────────────────────────────────────
+function removeOverlay() {
+  const overlay = document.getElementById('app-loading');
+  if (overlay) {
+    overlay.classList.add('fade-out');
+    setTimeout(() => {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }, 500);
   }
 }
 
-async function updateDataStatusUI() {
-  if (!AppState.backendAvailable) return;
-
-  try {
-    const status = await ApiClient.getDataStatus();
-    const el = (id) => document.getElementById(id);
-
-    if (el('ds-stock-count')) el('ds-stock-count').textContent = status.stock_count || '--';
-    if (el('ds-last-price')) {
-      const d = status.last_price_date;
-      el('ds-last-price').textContent = d ? `${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6)}` : '--';
-    }
-    if (el('ds-cache-age')) {
-      el('ds-cache-age').textContent = status.cache_age_hours != null ? `${status.cache_age_hours}h` : '--';
-    }
-    if (el('ds-data-state')) {
-      const hasAll = status.has_prices && status.has_financials && status.has_indicators;
-      el('ds-data-state').textContent = hasAll ? '完整' : '部分';
-      el('ds-data-state').style.color = hasAll ? '#10B981' : '#F59E0B';
-    }
-  } catch { }
-}
-
-async function loadLiveData() {
-  const loadingEl = document.getElementById('app-loading');
-  const statusEl = document.getElementById('loading-status');
-
-  try {
-    if (statusEl) statusEl.textContent = '从后端加载实时数据...';
-
-    // Fetch screener results from API
-    const screenerResult = await ApiClient.runScreener(
-      AppState.weights, {}, []
-    );
-
-    // Transform API results to match frontend format
-    AppState.screenerResults = screenerResult.results || [];
-    renderResults(AppState.screenerResults);
-    renderKPI(AppState.screenerResults);
-    renderCharts(AppState.screenerResults);
-
-    if (loadingEl) {
-      loadingEl.style.opacity = '0';
-      loadingEl.style.transition = 'opacity 0.4s ease';
-      setTimeout(() => { loadingEl.style.display = 'none'; }, 400);
-    }
-
-    // Update header data source indicator
-    const dsIndicator = document.querySelector('.data-source');
-    if (dsIndicator) {
-      dsIndicator.innerHTML = '● Tushare Pro (实时)';
-      dsIndicator.style.color = '#10B981';
-    }
-  } catch (err) {
-    console.error('实时数据加载失败:', err);
-    if (statusEl) statusEl.textContent = `实时数据加载失败: ${err.message}`;
-  }
-}
-
-// ─── Bootstrap ────────────────────────────────────────────────────────────────
+// ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  initTabs();
-  startClock();
-  initTableSort();
-  initSettings();
-  loadData();  // Always start with demo data, then switch if backend is available
+  const dl = window._debugLog || function(){};
+  dl('DOMContentLoaded fired');
+  try {
+    initTabs();
+    dl('initTabs OK');
+    initTableSort();
+    dl('initTableSort OK');
+    startClock();
+    dl('startClock OK');
+  } catch (e) {
+    dl('Init error: ' + e.message, '#f44');
+    console.error('[Quant] Init error:', e);
+  }
+  // Always remove overlay after 3 seconds max, even if loadData fails
+  setTimeout(removeOverlay, 3000);
+  loadData().then(() => {
+    dl('loadData complete');
+  }).catch(e => {
+    dl('loadData error: ' + e.message, '#f44');
+    console.error('[Quant] loadData error:', e);
+    removeOverlay();
+  });
 });
