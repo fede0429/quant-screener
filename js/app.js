@@ -787,11 +787,24 @@ function updateWeightDisplay() {
 
 // ─── Filter Controls ──────────────────────────────────────────────────────────
 function initFilterControls() {
-  // Collapsible sections
+  // Collapsible sections (Accordion behavior)
+  const allSections = document.querySelectorAll('.filter-section');
   document.querySelectorAll('.filter-section-header').forEach(header => {
     header.addEventListener('click', () => {
       const section = header.closest('.filter-section');
-      section.classList.toggle('collapsed');
+      const isCurrentlyCollapsed = section.classList.contains('collapsed');
+
+      // Collapse all sections first
+      allSections.forEach(s => s.classList.add('collapsed'));
+
+      // If it was collapsed, open it and scroll into view
+      if (isCurrentlyCollapsed) {
+        section.classList.remove('collapsed');
+        // Small timeout to allow DOM transition before scrolling
+        setTimeout(() => {
+          section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 80);
+      }
     });
   });
 
