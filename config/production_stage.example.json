@@ -1,0 +1,23 @@
+{
+  "sources": {
+    "enabled": true,
+    "mode": "dry_run"
+  },
+  "broker": {
+    "enabled": false,
+    "dry_run_default": true
+  },
+  "runtime": {
+    "mode": "dry_run",
+    "jobs": [
+      "preopen_scan",
+      "intraday_update",
+      "tail_session_run",
+      "nextday_exit_run"
+    ]
+  },
+  "monitoring": {
+    "enabled": true,
+    "alerting_enabled": true
+  }
+}

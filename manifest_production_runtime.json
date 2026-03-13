@@ -1,0 +1,11 @@
+{
+  "package_name": "production_stage_convergence_pack",
+  "version": "0.2.0",
+  "type": "stage_convergence_pack",
+  "contains": [
+    "production_pack_01_real_data_sources",
+    "production_pack_02_broker_execution",
+    "production_pack_03_runtime_orchestration",
+    "production_pack_04_monitoring_alerting"
+  ]
+}
