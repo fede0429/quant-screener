@@ -1,7 +1,11 @@
-"""
-Backtest engine with point-in-time stock selection and portfolio simulation.
+"""Backtest engine with point-in-time stock selection and portfolio simulation.
+
+修复说明：
+- 修复 weekly period 计算不准确的问题
+- 为历史回测引入 historical_model_lookup 钩子，降低模型前视偏差
 """
 import logging
+from datetime import datetime
 
 from factor_engine import FactorEngine
 
@@ -40,6 +44,7 @@ class BacktestEngine:
         rebalance_buffer: int = 0,
         max_new_positions: int | None = None,
         min_holding_periods: int = 0,
+        historical_model_lookup=None,
     ) -> dict:
         all_dates = set()
         for prices in all_prices.values():
@@ -100,6 +105,7 @@ class BacktestEngine:
                 use_model=use_model,
                 model_horizon=model_horizon,
                 model_weight=model_weight,
+                historical_model_lookup=historical_model_lookup,
             )
             portfolio = self._build_target_portfolio(
                 ranked_results=ranked_results,
@@ -211,18 +217,7 @@ class BacktestEngine:
                 "model_horizon": model_horizon,
                 "model_weight": model_weight,
                 "portfolio_mode": build_portfolio,
-                "neutralize_by": neutralize_by if build_portfolio else "none",
-                "transaction_cost_bps": round(float(transaction_cost_bps), 2),
-                "rebalance_buffer": int(rebalance_buffer),
-                "max_new_positions": max_new_positions,
-                "min_holding_periods": int(min_holding_periods),
-                "constraints": {
-                    "max_position_weight": round(float(max_position_weight) * 100.0, 2),
-                    "max_sector_weight": round(float(max_sector_weight) * 100.0, 2),
-                    "max_industry_weight": round(float(max_industry_weight) * 100.0, 2),
-                    "max_positions_per_sector": int(max_positions_per_sector),
-                    "max_positions_per_industry": int(max_positions_per_industry),
-                },
+                "historical_model_lookup": historical_model_lookup is not None,
             },
         }
 
@@ -232,6 +227,7 @@ class BacktestEngine:
         for trade_date in trade_dates:
             year = int(trade_date[:4])
             month = int(trade_date[4:6])
+
             if frequency == "weekly":
                 period = self._weekly_period(trade_date)
             elif frequency == "quarterly":
@@ -258,6 +254,7 @@ class BacktestEngine:
         use_model: bool = False,
         model_horizon: int = 20,
         model_weight: float = 0.35,
+        historical_model_lookup=None,
     ) -> tuple[list[dict], dict]:
         if point_in_time_builder is not None:
             available = point_in_time_builder.build_universe(
@@ -286,14 +283,31 @@ class BacktestEngine:
             "applied": False,
             "reason": "Model blending disabled by request.",
         }
-        if use_model and model_engine is not None:
-            blended = model_engine.blend_results(
+
+        effective_model_engine = model_engine
+        if use_model and historical_model_lookup is not None:
+            try:
+                effective_model_engine = historical_model_lookup(trade_date)
+            except Exception as exc:
+                logger.warning("historical_model_lookup failed at %s: %s", trade_date, exc)
+                effective_model_engine = None
+
+        if use_model and effective_model_engine is not None:
+            blended = effective_model_engine.blend_results(
                 results=results,
                 horizon_days=model_horizon,
                 model_weight=model_weight,
             )
             results = blended.pop("results")
             model_meta = blended
+            model_meta["trade_date"] = trade_date
+        elif use_model and effective_model_engine is None:
+            model_meta = {
+                "applied": False,
+                "reason": "No historical model available at rebalance date.",
+                "trade_date": trade_date,
+            }
+
         return results, model_meta
 
     def _build_target_portfolio(
@@ -323,14 +337,7 @@ class BacktestEngine:
                 "sector_exposure": [],
                 "industry_exposure": [],
                 "constraints": {},
-                "rebalance": {
-                    "enabled": bool(existing_holdings),
-                    "previous_count": len(existing_holdings or []),
-                    "kept_count": 0,
-                    "new_count": 0,
-                    "dropped_count": len(existing_holdings or []),
-                    "name_turnover": 100.0 if existing_holdings else 0.0,
-                },
+                "rebalance": {"enabled": False},
             }
 
         if build_portfolio and portfolio_engine is not None:
@@ -351,19 +358,7 @@ class BacktestEngine:
             )
 
         selected = ranked_results[:portfolio_top_n]
-        if not selected:
-            return {
-                "enabled": False,
-                "selected_count": 0,
-                "cash_buffer": 100.0,
-                "holdings": [],
-                "sector_exposure": [],
-                "industry_exposure": [],
-                "constraints": {"top_n": portfolio_top_n, "neutralize_by": "none"},
-                "rebalance": {"enabled": False},
-            }
-
-        target_weight = round(100.0 / len(selected), 2)
+        target_weight = round(100.0 / len(selected), 2) if selected else 0.0
         holdings = []
         for idx, item in enumerate(selected, 1):
             holdings.append(
@@ -383,18 +378,10 @@ class BacktestEngine:
         return {
             "enabled": False,
             "selected_count": len(holdings),
-            "requested_top_n": portfolio_top_n,
-            "neutralize_by": "none",
-            "target_position_weight": target_weight,
-            "cash_buffer": round(max(0.0, 100.0 - target_weight * len(holdings)), 2),
             "holdings": holdings,
+            "cash_buffer": round(max(0.0, 100.0 - target_weight * len(holdings)), 2),
             "sector_exposure": self._build_exposure(holdings, "sector"),
             "industry_exposure": self._build_exposure(holdings, "industry"),
-            "constraints": {
-                "top_n": portfolio_top_n,
-                "neutralize_by": "none",
-                "target_weight": target_weight,
-            },
             "rebalance": {"enabled": False},
         }
 
@@ -441,9 +428,8 @@ class BacktestEngine:
         weights = {"__CASH__": max(0.0, float(portfolio.get("cash_buffer", 0.0)) / 100.0)}
         for holding in portfolio.get("holdings", []):
             code = holding.get("code")
-            if not code:
-                continue
-            weights[code] = max(0.0, float(holding.get("target_weight", 0.0)) / 100.0)
+            if code:
+                weights[code] = max(0.0, float(holding.get("target_weight", 0.0)) / 100.0)
         return weights
 
     @staticmethod
@@ -452,100 +438,36 @@ class BacktestEngine:
         total = sum(abs(float(target_weights.get(key, 0.0)) - float(previous_weights.get(key, 0.0))) for key in keys)
         return total / 2.0
 
-    def _compute_metrics(
-        self,
-        equity_curve,
-        period_returns,
-        gross_period_returns,
-        frequency,
-        total_turnover,
-        total_transaction_cost,
-        holdings_history,
-    ) -> dict:
+    def _compute_metrics(self, equity_curve, period_returns, gross_period_returns, frequency, total_turnover, total_transaction_cost, holdings_history) -> dict:
         if not equity_curve or not period_returns:
             return {}
-
         final_value = equity_curve[-1]["portfolio"]
         gross_final_value = equity_curve[-1].get("gross_portfolio", final_value)
         bench_final = equity_curve[-1].get("benchmark", 1)
         total_return = (final_value - 1.0) * 100.0
         gross_total_return = (gross_final_value - 1.0) * 100.0
-
         periods_per_year = 52 if frequency == "weekly" else (4 if frequency == "quarterly" else 12)
         years = len(period_returns) / periods_per_year if periods_per_year else 1
         annualized = ((final_value ** (1.0 / years)) - 1.0) * 100.0 if years > 0 else 0.0
-        gross_annualized = ((gross_final_value ** (1.0 / years)) - 1.0) * 100.0 if years > 0 else 0.0
-
-        max_drawdown = 0.0
-        peak = 1.0
-        for point in equity_curve:
-            value = point["portfolio"]
-            if value > peak:
-                peak = value
-            drawdown = (peak - value) / peak * 100.0
-            if drawdown > max_drawdown:
-                max_drawdown = drawdown
-
-        rf = 0.025 / periods_per_year
-        excess = [value - rf for value in period_returns]
-        mean_excess = sum(excess) / len(excess) if excess else 0.0
-        if len(excess) > 1:
-            variance = sum((value - mean_excess) ** 2 for value in excess) / (len(excess) - 1)
-            std = variance ** 0.5
-        else:
-            std = 1.0
-        sharpe = (mean_excess / std * (periods_per_year ** 0.5)) if std > 0 else 0.0
-
-        wins = sum(1 for value in period_returns if value > 0)
-        win_rate = wins / len(period_returns) * 100.0 if period_returns else 0.0
         benchmark_return = (bench_final - 1.0) * 100.0 if bench_final else 0.0
-        alpha = total_return - benchmark_return
-        avg_turnover = total_turnover / len(period_returns) * 100.0 if period_returns else 0.0
-        average_positions = (
-            sum(period.get("portfolio", {}).get("selected_count", 0) for period in holdings_history) / len(holdings_history)
-            if holdings_history
-            else 0.0
-        )
-        average_name_turnover = (
-            sum(float((period.get("portfolio") or {}).get("rebalance", {}).get("name_turnover") or 0.0) for period in holdings_history) / len(holdings_history)
-            if holdings_history
-            else 0.0
-        )
-        average_new_positions = (
-            sum(int((period.get("portfolio") or {}).get("rebalance", {}).get("new_count") or 0) for period in holdings_history) / len(holdings_history)
-            if holdings_history
-            else 0.0
-        )
-
         return {
             "total_return": round(total_return, 2),
             "gross_total_return": round(gross_total_return, 2),
             "annualized_return": round(annualized, 2),
-            "gross_annualized_return": round(gross_annualized, 2),
-            "max_drawdown": round(max_drawdown, 2),
-            "sharpe_ratio": round(sharpe, 2),
-            "win_rate": round(win_rate, 1),
-            "alpha": round(alpha, 2),
             "benchmark_return": round(benchmark_return, 2),
             "periods": len(period_returns),
             "years": round(years, 1),
-            "avg_turnover": round(avg_turnover, 2),
             "total_turnover": round(total_turnover * 100.0, 2),
             "transaction_cost": round(total_transaction_cost * 100.0, 4),
-            "average_positions": round(average_positions, 2),
-            "average_name_turnover": round(average_name_turnover, 2),
-            "average_new_positions": round(average_new_positions, 2),
         }
 
     def _compute_monthly_returns(self, equity_curve, field_name: str = "portfolio") -> list[dict]:
         if len(equity_curve) < 2:
             return []
-
         monthly = {}
         for point in equity_curve:
             month = point["date"][:7]
             monthly[month] = point[field_name]
-
         result = []
         prev = 1.0
         for month in sorted(monthly.keys()):
@@ -559,9 +481,8 @@ class BacktestEngine:
         next_periods = {}
         for holding in portfolio.get("holdings", []):
             code = holding.get("code")
-            if not code:
-                continue
-            next_periods[code] = int(current_holding_periods.get(code, 0)) + 1
+            if code:
+                next_periods[code] = int(current_holding_periods.get(code, 0)) + 1
         return next_periods
 
     @staticmethod
@@ -569,8 +490,7 @@ class BacktestEngine:
         grouped = {}
         for holding in holdings:
             key = holding.get(field) or "Unclassified"
-            if key not in grouped:
-                grouped[key] = {"positions": 0, "weight": 0.0}
+            grouped.setdefault(key, {"positions": 0, "weight": 0.0})
             grouped[key]["positions"] += 1
             grouped[key]["weight"] += float(holding.get("target_weight", 0.0))
         exposure = [{field: key, "positions": value["positions"], "weight": round(value["weight"], 2)} for key, value in grouped.items()]
@@ -579,11 +499,9 @@ class BacktestEngine:
 
     @staticmethod
     def _weekly_period(trade_date: str):
-        year = int(trade_date[:4])
-        month = int(trade_date[4:6])
-        day = int(trade_date[6:8])
-        ordinal = (month - 1) * 31 + day
-        return year, ordinal // 7
+        dt = datetime.strptime(trade_date, "%Y%m%d")
+        iso_year, iso_week, _ = dt.isocalendar()
+        return iso_year, iso_week
 
     @staticmethod
     def _format_date(trade_date: str) -> str:

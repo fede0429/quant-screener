@@ -1,0 +1,11 @@
+{
+  "package_name": "mainline_repair_stage_convergence_pack",
+  "version": "0.2.0",
+  "type": "stage_convergence_pack",
+  "contains": [
+    "mainline_repair_pack_01_data_fetcher",
+    "mainline_repair_pack_02_backtest_engine",
+    "mainline_repair_pack_03_cache_db",
+    "mainline_repair_pack_04_server_worker"
+  ]
+}
