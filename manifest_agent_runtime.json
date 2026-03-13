@@ -1,9 +1,0 @@
-{
-  "package_name": "agent_runtime_final_convergence_pack",
-  "version": "0.3.0",
-  "type": "final_convergence_pack",
-  "contains": [
-    "a_share_agent_v1_mainline_merge_pack",
-    "agent_mainline_integration_stage_convergence_pack"
-  ]
-}
