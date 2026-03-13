@@ -1,0 +1,26 @@
+{
+  "gate": {
+    "enabled": true
+  },
+  "cleaner": {
+    "enabled": true
+  },
+  "extractor": {
+    "enabled": true
+  },
+  "versioning": {
+    "enabled": true
+  },
+  "dedup": {
+    "enabled": true
+  },
+  "store": {
+    "backend": "in_memory"
+  },
+  "task_runner": {
+    "batch_mode": true
+  },
+  "review_queue": {
+    "enabled": true
+  }
+}

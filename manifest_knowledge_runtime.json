@@ -1,0 +1,10 @@
+{
+  "package_name": "knowledge_runtime_stage_convergence_pack",
+  "version": "0.2.0",
+  "type": "stage_convergence_pack",
+  "contains": [
+    "knowledge_runtime_pack_01_gate_clean_unit",
+    "knowledge_runtime_pack_02_version_dedup_store",
+    "knowledge_runtime_pack_03_task_runner_review_queue"
+  ]
+}
