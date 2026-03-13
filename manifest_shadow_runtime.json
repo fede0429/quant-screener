@@ -1,0 +1,10 @@
+{
+  "package_name": "shadow_runtime_stage_convergence_pack",
+  "version": "0.2.0",
+  "type": "stage_convergence_pack",
+  "contains": [
+    "shadow_runtime_pack_01_proposal_ledger",
+    "shadow_runtime_pack_02_outcome_compare_review",
+    "shadow_runtime_pack_03_suggestion_adjust_stats"
+  ]
+}

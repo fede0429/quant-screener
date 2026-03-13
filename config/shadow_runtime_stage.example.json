@@ -1,0 +1,24 @@
+{
+  "proposal_ledger": {
+    "enabled": true
+  },
+  "shadow_replay": {
+    "enabled": true,
+    "windows": [
+      1,
+      3,
+      5
+    ]
+  },
+  "review_runtime": {
+    "enabled": true,
+    "compare_real_trade": true
+  },
+  "suggestion_runtime": {
+    "enabled": true,
+    "auto_apply": false
+  },
+  "stats": {
+    "template_stats": true
+  }
+}
