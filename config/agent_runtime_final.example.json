@@ -1,0 +1,17 @@
+{
+  "package_mode": "agent_runtime_final_convergence",
+  "inputs": {
+    "base_screener_real": true,
+    "event_scores_real": true,
+    "technical_scores_real": true
+  },
+  "compliance": {
+    "enabled": true,
+    "kill_switch": true,
+    "manual_override": true
+  },
+  "runtime": {
+    "default_quantity": 100,
+    "priority_bucket": "core"
+  }
+}
